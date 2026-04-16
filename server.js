@@ -126,13 +126,35 @@ function preloadTodayTracks() {
   fs.readdirSync(dir).filter(f => f.endsWith('.gpx')).forEach(file => {
     try {
       const content = fs.readFileSync(path.join(dir, file), 'utf8');
-      const m = content.match(/<metadata>\s*<desc>([^<]+)<\/desc>\s*<\/metadata>/);
-      if (!m) return;
-      const deviceId = m[1];
+
+      // Primary: deviceId stored in <metadata><desc>
+      let deviceId = (content.match(/<metadata>\s*<desc>([^<]+)<\/desc>\s*<\/metadata>/) || [])[1];
+
+      // Fallback: extract from <name>Label (deviceId) — date</name>
+      if (!deviceId) {
+        deviceId = (content.match(/<name>[^(]*\(([^)]+)\)/) || [])[1];
+      }
+
+      if (!deviceId) return;
+
       if (!trackpoints.has(deviceId)) trackpoints.set(deviceId, new Map());
       const devMap = trackpoints.get(deviceId);
       if (!devMap.has(today)) {
-        const points = loadExistingPoints(deviceId, today);
+        // Parse points directly from the content we already have in memory
+        const points = [];
+        const re = /<trkpt lat="([^"]+)" lon="([^"]+)">([\s\S]*?)<\/trkpt>/g;
+        let m;
+        while ((m = re.exec(content)) !== null) {
+          const inner = m[3];
+          points.push({
+            lat: parseFloat(m[1]),
+            lon: parseFloat(m[2]),
+            ele: (inner.match(/<ele>([^<]+)<\/ele>/) || [])[1] ?? null,
+            acc: null, // acc is not stored in GPX
+            spd: (inner.match(/<speed>([^<]+)<\/speed>/) || [])[1] ?? null,
+            time: (inner.match(/<time>([^<]+)<\/time>/) || [])[1] ?? new Date().toISOString(),
+          });
+        }
         devMap.set(today, points);
       }
     } catch {}
@@ -267,25 +289,16 @@ function broadcast(data) {
 // known device so the map is populated immediately without waiting for the
 // next GPSLogger ping from each phone.
 wss.on('connection', ws => {
+  // Send the latest position for every known device immediately on connect
   devices.forEach(data => {
     ws.send(JSON.stringify({ type: 'location', ...data }));
-  });
-  // Send today's full track for each device so the polyline is drawn immediately
-  const today = dateStr(Date.now());
-  trackpoints.forEach((devMap, deviceId) => {
-    const points = devMap.get(today);
-    if (points && points.length > 0) {
-      ws.send(JSON.stringify({
-        type: 'track',
-        deviceId,
-        points: points.map(p => ({ lat: p.lat, lon: p.lon })),
-      }));
-    }
   });
   // Replay the last 10 log lines so the bar is populated immediately
   logBuffer.slice(-10).forEach(line => {
     ws.send(JSON.stringify({ type: 'log', message: line }));
   });
+  // The full day's track is delivered via GET /tracks (called by the browser
+  // in ws.onopen) so there is no need to stream it over the WebSocket.
 });
 
 // Expose the app version from package.json

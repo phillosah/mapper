@@ -410,7 +410,6 @@
     const dotMarkers = {};
     const accCircles = {};
     const liveAccCircle = {};
-    const tracksLoaded = {};
 
     function ensurePolyline(id) {
       if (!polylines[id]) {
@@ -490,23 +489,6 @@
       points.forEach(p => addDot(id, p.lat, p.lon, p.time, p.acc));
     }
 
-    // Fetch today's full history for all devices via REST on initial page load
-    fetch('/tracks')
-      .then(r => r.json())
-      .then(allTracks => {
-        Object.entries(allTracks).forEach(([id, points]) => {
-          tracksLoaded[id] = true;
-          loadTrack(id, points);
-        });
-      });
-
-    // WebSocket track replay — fallback for devices not yet in REST response
-    function onTrack(data) {
-      if (tracksLoaded[data.deviceId]) return;
-      tracksLoaded[data.deviceId] = true;
-      loadTrack(data.deviceId, data.points);
-    }
-
     // Single new point broadcast on each update
     function onTrackpoint(data) {
       ensurePolyline(data.deviceId);
@@ -540,13 +522,22 @@
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(`${proto}://${location.host}/ws`);
 
-      ws.onopen = () => { document.getElementById('status').textContent = 'Connected'; };
+      ws.onopen = () => {
+        document.getElementById('status').textContent = 'Connected';
+        // Load today's full track via REST now that the connection is up.
+        // Doing this in onopen (rather than at page load) ensures the server
+        // has finished its preload and the in-memory trackpoints are ready.
+        fetch('/tracks')
+          .then(r => r.json())
+          .then(allTracks => {
+            Object.entries(allTracks).forEach(([id, points]) => loadTrack(id, points));
+          });
+      };
 
       ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.type === 'location') onLocation(data);
         if (data.type === 'log') addLog(data.message);
-        if (data.type === 'track') onTrack(data);
         if (data.type === 'trackpoint') onTrackpoint(data);
       };
 
