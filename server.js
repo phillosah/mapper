@@ -316,17 +316,26 @@ function broadcast(data) {
 }
 
 // When a new browser tab connects, immediately send it:
-//   1. The latest known position for every tracked device (so markers appear)
-//   2. The last 10 log lines (so the log bar isn't empty)
-// The full day's GPS trail is delivered separately via GET /tracks, which the
-// browser calls in its ws.onopen handler once the connection is confirmed.
+//   1. The latest known position for every tracked device → markers appear instantly
+//   2. Today's full track for every device → polylines and history dots appear
+//   3. The last 10 log lines → log bar shows recent activity straight away
+//
+// Pushing tracks over the WebSocket (rather than having the browser fetch /tracks
+// separately) is more reliable: a single connection delivers everything atomically,
+// with no race between the HTTP response and incoming WS messages.
 wss.on('connection', ws => {
-  // Replay current device positions so the map is populated straight away
+  // ① Replay current device positions so markers appear immediately
   devices.forEach(data => {
     ws.send(JSON.stringify({ type: 'location', ...data }));
   });
 
-  // Replay the most recent log entries so the log bar shows recent activity
+  // ② Push today's full track for every device so the polylines are drawn
+  const tracks = getTodayTracks();
+  Object.entries(tracks).forEach(([deviceId, points]) => {
+    ws.send(JSON.stringify({ type: 'track', deviceId, points }));
+  });
+
+  // ③ Replay the most recent log entries
   logBuffer.slice(-10).forEach(line => {
     ws.send(JSON.stringify({ type: 'log', message: line }));
   });
@@ -339,14 +348,12 @@ wss.on('connection', ws => {
 const { version } = require('./package.json');
 app.get('/version', (req, res) => res.json({ version }));
 
-// GET /tracks — returns today's full point list for all known devices.
-// Response shape: { deviceId: [{ lat, lon, time, acc }, …], … }
-// Called by the browser immediately on page load (and again on WS reconnect).
-//
-// Reads directly from the GPX files on disk rather than from the in-memory Map
-// so the response is always accurate even if preloadTodayTracks() missed a file.
-// In-memory points added since the last GPX write are merged in on top.
-app.get('/tracks', (req, res) => {
+// getTodayTracks — builds the full point list for every device for today.
+// Reads directly from GPX files on disk so it works even after a server restart
+// (preloadTodayTracks() populates memory, but disk is the ground truth).
+// In-memory points not yet flushed to disk are merged in on top.
+// Returns: { deviceId: [{ lat, lon, time, acc }, …], … }
+function getTodayTracks() {
   const today  = dateStr(Date.now());
   const result = {};
 
@@ -374,7 +381,7 @@ app.get('/tracks', (req, res) => {
             lat:  parseFloat(m[1]),
             lon:  parseFloat(m[2]),
             time: (inner.match(/<time>([^<]+)<\/time>/)   || [])[1] ?? new Date().toISOString(),
-            acc:  null, // accuracy is not persisted in GPX
+            acc:  null, // accuracy radius is not persisted in GPX
           });
         }
 
@@ -383,9 +390,8 @@ app.get('/tracks', (req, res) => {
     });
   }
 
-  // ② Merge any in-memory points that haven't been flushed to disk yet
-  // (in practice writeGpx is synchronous so this is rarely needed, but
-  //  it ensures the very latest point is always included)
+  // ② Merge any in-memory points not yet on disk (writeGpx is synchronous so
+  //    this mainly catches the very latest point during a concurrent request)
   trackpoints.forEach((devMap, deviceId) => {
     const pts = devMap.get(today);
     if (!pts || pts.length === 0) return;
@@ -398,8 +404,12 @@ app.get('/tracks', (req, res) => {
     }
   });
 
-  res.json(result);
-});
+  return result;
+}
+
+// GET /tracks — HTTP endpoint returning today's tracks (kept for diagnostics /
+// external tooling; the browser now receives tracks via WebSocket on connect).
+app.get('/tracks', (req, res) => res.json(getTodayTracks()));
 
 // GET /gpx/:deviceId — serves today's GPX file for a single device as a
 // file download. The browser triggers this when the ⇩ button is clicked.

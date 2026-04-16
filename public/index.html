@@ -693,15 +693,16 @@
 
       ws.onopen = () => {
         document.getElementById('status').textContent = 'Connected';
-        // Refresh the trail on every (re)connect in case tracks changed while disconnected
-        fetchTracks();
+        // Tracks are now pushed by the server via 'track' messages on every connect,
+        // so no separate HTTP fetch is needed here.
       };
 
       ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
-        if (data.type === 'location')   onLocation(data);   // live device position
-        if (data.type === 'trackpoint') onTrackpoint(data); // new point added to trail
-        if (data.type === 'log')        addLog(data.message); // update log entry
+        if (data.type === 'location')   onLocation(data);               // live device position
+        if (data.type === 'trackpoint') onTrackpoint(data);             // new point appended live
+        if (data.type === 'track')      loadTrack(data.deviceId, data.points); // full day history
+        if (data.type === 'log')        addLog(data.message);           // update log entry
       };
 
       ws.onclose = () => {
@@ -734,22 +735,10 @@
       Object.keys(deviceData).forEach(updateMarkerColour);
     }, 60000);
 
-    // ── Track loader ──────────────────────────────────────────────────────────
-    // Fetches today's full GPS trail for all devices from GET /tracks and
-    // draws it on the map. Called once on page load and again on every
-    // WebSocket reconnect so stale tabs catch up automatically.
-    function fetchTracks() {
-      fetch('/tracks')
-        .then(r => r.json())
-        .then(allTracks => {
-          Object.entries(allTracks).forEach(([id, points]) => loadTrack(id, points));
-        });
-    }
-
-    // Load the trail immediately on page load — don't wait for the WS handshake
-    fetchTracks();
-
-    // Kick off the WebSocket connection
+    // Kick off the WebSocket connection.
+    // The server pushes 'location', 'track', and 'log' messages on connect, so
+    // the map is fully populated as soon as the WebSocket handshake completes —
+    // no separate HTTP fetch needed.
     connect();
   </script>
 </body>
