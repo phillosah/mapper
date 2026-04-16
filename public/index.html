@@ -335,10 +335,11 @@
         const batt = d.batt !== null ? `&#x1F50B; ${d.batt}%` : '';
         const spd  = d.spd  !== null ? `&#x1F3CE; ${(d.spd * 3.6).toFixed(1)} km/h` : '';
         const acc  = d.acc  !== null ? `&#x25CE; &plusmn;${d.acc}m` : '';
+        const freshDot = isFresh(id) ? '#a6e3a1' : '#f38ba8';
         return `
           <div class="device-card" onclick="focusDevice('${id}')">
             <div class="device-name-row" id="name-row-${id}">
-              <span class="dot"></span>
+              <span class="dot" style="background:${freshDot}"></span>
               <span class="device-name">${label}</span>
               <button class="edit-btn" onclick="startEdit(event,'${id}')" title="Set nickname">&#x270F;</button>
               <button class="gpx-btn" onclick="downloadGpx(event,'${id}')" title="Download today&#39;s GPX">&#x21E9;</button>
@@ -379,10 +380,36 @@
       }
     }
 
-    // ── Track polylines & history dots ───────────────────────────────────────
-    // dotMarkers[id] = array of L.circleMarker (one per historical position)
+    // ── Freshness ─────────────────────────────────────────────────────────────
+    const FRESH_MS = 5 * 60 * 1000; // 5 minutes
+    function isFresh(id) {
+      const d = deviceData[id];
+      return d && (Date.now() - d.timestamp) < FRESH_MS;
+    }
+
+    // ── Live marker icon (green = fresh, red = stale) ─────────────────────────
+    function liveIcon(id) {
+      const colour = isFresh(id) ? '#a6e3a1' : '#f38ba8';
+      return L.divIcon({
+        className: '',
+        html: `<div style="width:16px;height:16px;border-radius:50%;background:${colour};border:2.5px solid white;box-shadow:0 1px 5px rgba(0,0,0,0.5)"></div>`,
+        iconSize: [16, 16],
+        iconAnchor: [8, 8],
+        popupAnchor: [0, -10],
+      });
+    }
+
+    function updateMarkerColour(id) {
+      if (markers[id]) markers[id].setIcon(liveIcon(id));
+    }
+
+    // ── Track polylines, history dots & accuracy circles ──────────────────────
+    // dotMarkers[id]      = array of L.circleMarker (one per historical position)
+    // accCircles[id]      = array of L.circle for historical accuracy rings
+    // liveAccCircle[id]   = single L.circle for the current position accuracy
     const dotMarkers = {};
-    // Whether the full-day history has been loaded from REST for this device
+    const accCircles = {};
+    const liveAccCircle = {};
     const tracksLoaded = {};
 
     function ensurePolyline(id) {
@@ -394,11 +421,26 @@
           opacity: 0.75,
         }).addTo(map);
         dotMarkers[id] = [];
+        accCircles[id] = [];
       }
     }
 
-    function addDot(id, lat, lon, isoTime) {
+    function addDot(id, lat, lon, isoTime, acc) {
       const colour = getColour(id);
+      // Accuracy ring — radius in metres, projects correctly on the map
+      if (acc != null && acc > 0) {
+        const ring = L.circle([lat, lon], {
+          radius: acc,
+          color: colour,
+          fillColor: colour,
+          fillOpacity: 0.07,
+          weight: 1,
+          opacity: 0.35,
+          interactive: false,
+        }).addTo(map);
+        accCircles[id].push(ring);
+      }
+      // Position dot
       const dot = L.circleMarker([lat, lon], {
         radius: 4,
         color: colour,
@@ -406,7 +448,9 @@
         fillOpacity: 0.85,
         weight: 1,
       }).bindPopup(
-        `<b>${getLabel(id)}</b><br>${lat.toFixed(5)}, ${lon.toFixed(5)}<br><small>${new Date(isoTime).toLocaleTimeString()}</small>`,
+        `<b>${getLabel(id)}</b><br>${lat.toFixed(5)}, ${lon.toFixed(5)}<br>`+
+        (acc != null ? `Accuracy: &plusmn;${acc}m<br>` : '') +
+        `<small>${new Date(isoTime).toLocaleTimeString()}</small>`,
         { maxWidth: 180 }
       ).addTo(map);
       dotMarkers[id].push(dot);
@@ -414,20 +458,39 @@
 
     function clearDots(id) {
       (dotMarkers[id] || []).forEach(d => d.remove());
+      (accCircles[id]  || []).forEach(c => c.remove());
       dotMarkers[id] = [];
+      accCircles[id]  = [];
     }
 
-    // Load a full track (array of {lat, lon, time}) for a device
+    // Update the single accuracy circle shown under the live marker
+    function updateLiveAccCircle(id, lat, lon, acc) {
+      if (liveAccCircle[id]) { liveAccCircle[id].remove(); delete liveAccCircle[id]; }
+      if (acc != null && acc > 0) {
+        liveAccCircle[id] = L.circle([lat, lon], {
+          radius: acc,
+          color: getColour(id),
+          fillColor: getColour(id),
+          fillOpacity: 0.12,
+          weight: 1.5,
+          opacity: 0.5,
+          interactive: false,
+        }).addTo(map);
+        // Keep circle beneath the marker
+        liveAccCircle[id].bringToBack();
+      }
+    }
+
+    // Load a full track (array of {lat, lon, time, acc}) for a device
     function loadTrack(id, points) {
       ensurePolyline(id);
       clearDots(id);
       trackLatLngs[id] = points.map(p => [p.lat, p.lon]);
       polylines[id].setLatLngs(trackLatLngs[id]);
-      points.forEach(p => addDot(id, p.lat, p.lon, p.time));
+      points.forEach(p => addDot(id, p.lat, p.lon, p.time, p.acc));
     }
 
-    // Fetch today's full history for all devices via REST on initial page load.
-    // This also handles the case where the server was just restarted.
+    // Fetch today's full history for all devices via REST on initial page load
     fetch('/tracks')
       .then(r => r.json())
       .then(allTracks => {
@@ -437,10 +500,9 @@
         });
       });
 
-    // WebSocket track replay — used for devices that come online after the REST
-    // load (e.g. new device seen for the first time today)
+    // WebSocket track replay — fallback for devices not yet in REST response
     function onTrack(data) {
-      if (tracksLoaded[data.deviceId]) return; // already loaded via REST
+      if (tracksLoaded[data.deviceId]) return;
       tracksLoaded[data.deviceId] = true;
       loadTrack(data.deviceId, data.points);
     }
@@ -450,7 +512,7 @@
       ensurePolyline(data.deviceId);
       trackLatLngs[data.deviceId].push([data.lat, data.lon]);
       polylines[data.deviceId].setLatLngs(trackLatLngs[data.deviceId]);
-      addDot(data.deviceId, data.lat, data.lon, data.time);
+      addDot(data.deviceId, data.lat, data.lon, data.time, data.acc);
     }
 
     // ── Location updates ──────────────────────────────────────────────────────
@@ -460,14 +522,16 @@
 
       if (markers[id]) {
         markers[id].setLatLng([data.lat, data.lon]);
+        markers[id].setIcon(liveIcon(id));
         if (markers[id].isPopupOpen()) markers[id].setPopupContent(popupContent(data));
       } else {
-        markers[id] = L.marker([data.lat, data.lon])
+        markers[id] = L.marker([data.lat, data.lon], { icon: liveIcon(id) })
           .bindPopup(popupContent(data))
           .addTo(map);
         if (Object.keys(deviceData).length === 1) map.setView([data.lat, data.lon], 14);
       }
 
+      updateLiveAccCircle(id, data.lat, data.lon, data.acc);
       updateSidebar();
     }
 
@@ -504,8 +568,11 @@
       el.scrollTop = el.scrollHeight;
     }
 
-    // Refresh sidebar every minute so relative timestamps stay accurate
-    setInterval(updateSidebar, 60000);
+    // Refresh sidebar and marker colours every minute
+    setInterval(() => {
+      updateSidebar();
+      Object.keys(deviceData).forEach(updateMarkerColour);
+    }, 60000);
 
     connect();
   </script>

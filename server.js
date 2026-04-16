@@ -102,6 +102,7 @@ function addTrackpoint(data) {
     lat: data.lat,
     lon: data.lon,
     ele: data.alt,
+    acc: data.acc,
     spd: data.spd,
     time: new Date(data.timestamp).toISOString(),
   });
@@ -111,6 +112,7 @@ function addTrackpoint(data) {
     deviceId: data.deviceId,
     lat: data.lat,
     lon: data.lon,
+    acc: data.acc,
     time: new Date(data.timestamp).toISOString(),
   });
 }
@@ -298,7 +300,7 @@ app.get('/tracks', (req, res) => {
   trackpoints.forEach((devMap, deviceId) => {
     const pts = devMap.get(today);
     if (pts && pts.length > 0) {
-      result[deviceId] = pts.map(p => ({ lat: p.lat, lon: p.lon, time: p.time }));
+      result[deviceId] = pts.map(p => ({ lat: p.lat, lon: p.lon, time: p.time, acc: p.acc ?? null }));
     }
   });
   res.json(result);
