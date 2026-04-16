@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mapper</title>
+  <!-- Leaflet CSS — required for map tiles and controls to render correctly -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* Full-height flex layout: sidebar on the left, map fills the rest */
+    body { display: flex; height: 100vh; font-family: sans-serif; }
+
+    #sidebar {
+      width: 260px;
+      background: #1e1e2e;
+      color: #cdd6f4;
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0; /* prevent sidebar from shrinking when map is small */
+    }
+    #sidebar h1 {
+      padding: 16px;
+      font-size: 1.1rem;
+      border-bottom: 1px solid #313244;
+      color: #89b4fa;
+      letter-spacing: 0.05em;
+    }
+    #sidebar h2 {
+      padding: 10px 16px 6px;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #6c7086;
+    }
+    #device-list { flex: 1; overflow-y: auto; } /* scrollable if many devices */
+    .device-card {
+      padding: 10px 16px;
+      border-bottom: 1px solid #181825;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .device-card:hover { background: #313244; }
+    .device-name {
+      font-weight: 600;
+      font-size: 0.9rem;
+      color: #cba6f7;
+      margin-bottom: 4px;
+    }
+    .device-meta {
+      font-size: 0.75rem;
+      color: #6c7086;
+      line-height: 1.6;
+    }
+    .device-meta span { margin-right: 8px; }
+    /* Green dot shown next to each device name to indicate it is active */
+    .dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #a6e3a1;
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+    /* Connection status bar at the bottom of the sidebar */
+    #status {
+      padding: 10px 16px;
+      font-size: 0.75rem;
+      color: #6c7086;
+      border-top: 1px solid #313244;
+    }
+    #map { flex: 1; }
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <h1>&#x1F4CD; Mapper</h1>
+    <h2>Devices</h2>
+    <!-- Device cards are injected here by updateSidebar() -->
+    <div id="device-list"><div class="device-meta" style="padding:12px 16px">No devices yet</div></div>
+    <div id="status">Connecting...</div>
+  </div>
+  <div id="map"></div>
+
+  <!-- Leaflet JS — must load after the CSS above -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    // Initialise the map centred on the world at zoom 2
+    const map = L.map('map').setView([20, 0], 2);
+
+    // OpenStreetMap raster tiles (free, no API key required)
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      maxZoom: 19,
+    }).addTo(map);
+
+    // Live Leaflet marker objects, keyed by deviceId
+    const markers = {};
+    // Latest location data for each device, keyed by deviceId
+    const deviceData = {};
+
+    // Format a Unix timestamp as a local time string (HH:MM:SS)
+    function formatTime(ts) {
+      return new Date(ts).toLocaleTimeString();
+    }
+
+    // Re-render the sidebar device list from the current deviceData state
+    function updateSidebar() {
+      const list = document.getElementById('device-list');
+      const ids = Object.keys(deviceData);
+      if (ids.length === 0) {
+        list.innerHTML = '<div class="device-meta" style="padding:12px 16px">No devices yet</div>';
+        return;
+      }
+      list.innerHTML = ids.map(id => {
+        const d = deviceData[id];
+        // Only render a field if the server sent a value for it
+        const batt = d.batt !== null ? `&#x1F50B; ${d.batt}%` : '';
+        // GPSLogger sends speed in m/s; convert to km/h for display
+        const spd = d.spd !== null ? `&#x1F3CE; ${(d.spd * 3.6).toFixed(1)} km/h` : '';
+        const acc = d.acc !== null ? `&#x25CE; &plusmn;${d.acc}m` : '';
+        return `
+          <div class="device-card" onclick="focusDevice('${id}')">
+            <div class="device-name"><span class="dot"></span>${id}</div>
+            <div class="device-meta">
+              <span>${d.lat.toFixed(5)}, ${d.lon.toFixed(5)}</span><br>
+              <span>${batt}</span><span>${spd}</span><span>${acc}</span><br>
+              <span>&#x23F1; ${formatTime(d.timestamp)}</span>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    // Pan and zoom the map to a specific device when its sidebar card is clicked
+    function focusDevice(id) {
+      const d = deviceData[id];
+      if (d) map.setView([d.lat, d.lon], 15);
+    }
+
+    // Handle an incoming location message from the WebSocket.
+    // Creates a new marker the first time a device is seen, then moves it on
+    // subsequent updates — avoiding the flicker of remove-and-recreate.
+    function onLocation(data) {
+      // Overwrite previous data so the sidebar always shows the latest values
+      deviceData[data.deviceId] = data;
+
+      // Build popup HTML as a function so it can be regenerated after updates
+      const popupContent = () => `
+        <b>${data.deviceId}</b><br>
+        ${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}<br>
+        ${data.acc !== null ? `Accuracy: &plusmn;${data.acc}m<br>` : ''}
+        ${data.batt !== null ? `Battery: ${data.batt}%<br>` : ''}
+        ${data.spd !== null ? `Speed: ${(data.spd * 3.6).toFixed(1)} km/h<br>` : ''}
+        ${data.alt !== null ? `Alt: ${data.alt}m<br>` : ''}
+        <small>${formatTime(data.timestamp)}</small>
+      `;
+
+      if (markers[data.deviceId]) {
+        // Device already has a marker — move it to the new position
+        markers[data.deviceId].setLatLng([data.lat, data.lon]);
+        // If the popup is open, refresh its content too
+        if (markers[data.deviceId].isPopupOpen()) {
+          markers[data.deviceId].setPopupContent(popupContent());
+        }
+      } else {
+        // First time seeing this device — create a marker and add it to the map
+        markers[data.deviceId] = L.marker([data.lat, data.lon])
+          .bindPopup(popupContent())
+          .addTo(map);
+        // Auto-pan to the first device only; subsequent devices don't hijack the view
+        if (Object.keys(deviceData).length === 1) {
+          map.setView([data.lat, data.lon], 14);
+        }
+      }
+
+      updateSidebar();
+    }
+
+    // Open a WebSocket connection and wire up event handlers.
+    // Called again automatically after a disconnect to keep the map live.
+    function connect() {
+      // Use wss:// when the page is served over HTTPS, ws:// otherwise
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+      ws.onopen = () => {
+        document.getElementById('status').textContent = 'Connected';
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'location') onLocation(data);
+      };
+
+      ws.onclose = () => {
+        document.getElementById('status').textContent = 'Disconnected — retrying...';
+        // Retry after 3 seconds; existing markers remain visible during the gap
+        setTimeout(connect, 3000);
+      };
+
+      // Trigger onclose (and therefore the retry) on any socket error
+      ws.onerror = () => ws.close();
+    }
+
+    connect();
+  </script>
+</body>
+</html>
