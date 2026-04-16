@@ -1,6 +1,6 @@
 {
   "name": "mapper",
-  "version": "2026.04.16.4",
+  "version": "2026.04.17.0",
   "description": "Real-time Android phone location tracker on OpenStreetMap",
   "main": "server.js",
   "scripts": {

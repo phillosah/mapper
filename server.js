@@ -103,6 +103,36 @@ ${trkpts}
   fs.writeFileSync(filePath, gpx, 'utf8');
 }
 
+// Reads an existing GPX file for a device+date from disk and returns the
+// parsed point array. Called by addTrackpoint() the first time a device is
+// seen for a given day, so that earlier points are preserved if the server
+// restarted mid-day and the in-memory Map was cleared.
+// Returns [] if the file doesn't exist or can't be read.
+function loadExistingPoints(deviceId, date) {
+  const filePath = gpxFilePath(deviceId, date);
+  if (!fs.existsSync(filePath)) return [];
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    const points  = [];
+    const re = /<trkpt lat="([^"]+)" lon="([^"]+)">([\s\S]*?)<\/trkpt>/g;
+    let m;
+    while ((m = re.exec(content)) !== null) {
+      const inner = m[3];
+      points.push({
+        lat:  parseFloat(m[1]),
+        lon:  parseFloat(m[2]),
+        ele:  (inner.match(/<ele>([^<]+)<\/ele>/)     || [])[1] ?? null,
+        acc:  null,
+        spd:  (inner.match(/<speed>([^<]+)<\/speed>/) || [])[1] ?? null,
+        time: (inner.match(/<time>([^<]+)<\/time>/)   || [])[1] ?? new Date().toISOString(),
+      });
+    }
+    return points;
+  } catch {
+    return [];
+  }
+}
+
 // Adds a new trackpoint for a device, then rewrites its GPX file and
 // broadcasts the new point to all connected browsers.
 function addTrackpoint(data) {
