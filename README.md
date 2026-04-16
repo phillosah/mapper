@@ -111,6 +111,7 @@ For a permanent setup, deploy the server to a VPS or cloud host and use its publ
 Mapper/
 ├── package.json      # Dependencies: express, ws
 ├── server.js         # HTTP + WebSocket server
+├── mapper.log        # Device update log (created automatically on first update)
 └── public/
     └── index.html    # Map frontend (Leaflet.js)
 ```
@@ -120,4 +121,15 @@ Mapper/
 - **Markers** — one per device, update position in real-time without page refresh
 - **Popups** — click a marker to see coordinates, accuracy, battery, speed, altitude, and last-seen time
 - **Sidebar** — lists all tracked devices with their latest stats; click a device to pan the map to it
+- **Log bar** — full-width panel at the bottom of the page showing the last 10 device updates
 - **Auto-reconnect** — browser WebSocket reconnects automatically if the connection drops
+
+## Device update log
+
+Every location update is appended to `mapper.log` in the project root:
+
+```
+[2026-04-16 14:23:45] device1 → 51.50123, -0.12345 batt=85% spd=12.3km/h acc=±5m alt=32m
+```
+
+The log bar at the bottom of the browser UI shows the last 10 lines and is populated immediately on page load by replaying recent entries from the server's in-memory buffer.
