@@ -361,7 +361,12 @@
       }
     }
 
-    // ── Track polylines ───────────────────────────────────────────────────────
+    // ── Track polylines & history dots ───────────────────────────────────────
+    // dotMarkers[id] = array of L.circleMarker (one per historical position)
+    const dotMarkers = {};
+    // Whether the full-day history has been loaded from REST for this device
+    const tracksLoaded = {};
+
     function ensurePolyline(id) {
       if (!polylines[id]) {
         trackLatLngs[id] = [];
@@ -370,14 +375,56 @@
           weight: 3,
           opacity: 0.75,
         }).addTo(map);
+        dotMarkers[id] = [];
       }
     }
 
-    // Full track replay sent on connect
+    function addDot(id, lat, lon, isoTime) {
+      const colour = getColour(id);
+      const dot = L.circleMarker([lat, lon], {
+        radius: 4,
+        color: colour,
+        fillColor: colour,
+        fillOpacity: 0.85,
+        weight: 1,
+      }).bindPopup(
+        `<b>${getLabel(id)}</b><br>${lat.toFixed(5)}, ${lon.toFixed(5)}<br><small>${new Date(isoTime).toLocaleTimeString()}</small>`,
+        { maxWidth: 180 }
+      ).addTo(map);
+      dotMarkers[id].push(dot);
+    }
+
+    function clearDots(id) {
+      (dotMarkers[id] || []).forEach(d => d.remove());
+      dotMarkers[id] = [];
+    }
+
+    // Load a full track (array of {lat, lon, time}) for a device
+    function loadTrack(id, points) {
+      ensurePolyline(id);
+      clearDots(id);
+      trackLatLngs[id] = points.map(p => [p.lat, p.lon]);
+      polylines[id].setLatLngs(trackLatLngs[id]);
+      points.forEach(p => addDot(id, p.lat, p.lon, p.time));
+    }
+
+    // Fetch today's full history for all devices via REST on initial page load.
+    // This also handles the case where the server was just restarted.
+    fetch('/tracks')
+      .then(r => r.json())
+      .then(allTracks => {
+        Object.entries(allTracks).forEach(([id, points]) => {
+          tracksLoaded[id] = true;
+          loadTrack(id, points);
+        });
+      });
+
+    // WebSocket track replay — used for devices that come online after the REST
+    // load (e.g. new device seen for the first time today)
     function onTrack(data) {
-      ensurePolyline(data.deviceId);
-      trackLatLngs[data.deviceId] = data.points.map(p => [p.lat, p.lon]);
-      polylines[data.deviceId].setLatLngs(trackLatLngs[data.deviceId]);
+      if (tracksLoaded[data.deviceId]) return; // already loaded via REST
+      tracksLoaded[data.deviceId] = true;
+      loadTrack(data.deviceId, data.points);
     }
 
     // Single new point broadcast on each update
@@ -385,6 +432,7 @@
       ensurePolyline(data.deviceId);
       trackLatLngs[data.deviceId].push([data.lat, data.lon]);
       polylines[data.deviceId].setLatLngs(trackLatLngs[data.deviceId]);
+      addDot(data.deviceId, data.lat, data.lon, data.time);
     }
 
     // ── Location updates ──────────────────────────────────────────────────────

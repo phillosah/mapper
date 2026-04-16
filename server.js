@@ -81,6 +81,7 @@ function writeGpx(deviceId, date) {
   const gpx =
 `<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="Mapper" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata><desc>${deviceId}</desc></metadata>
   <trk>
     <name>${label} (${deviceId}) \u2014 ${date}</name>
     <trkseg>
@@ -105,7 +106,35 @@ function addTrackpoint(data) {
     time: new Date(data.timestamp).toISOString(),
   });
   writeGpx(data.deviceId, date);
-  broadcast({ type: 'trackpoint', deviceId: data.deviceId, lat: data.lat, lon: data.lon });
+  broadcast({
+    type: 'trackpoint',
+    deviceId: data.deviceId,
+    lat: data.lat,
+    lon: data.lon,
+    time: new Date(data.timestamp).toISOString(),
+  });
+}
+
+// Pre-load today's GPX files into the trackpoints Map so browsers connecting
+// right after a server restart still receive the full day's history.
+function preloadTodayTracks() {
+  const today = dateStr(Date.now());
+  const dir = path.join(GPX_DIR, today);
+  if (!fs.existsSync(dir)) return;
+  fs.readdirSync(dir).filter(f => f.endsWith('.gpx')).forEach(file => {
+    try {
+      const content = fs.readFileSync(path.join(dir, file), 'utf8');
+      const m = content.match(/<metadata>\s*<desc>([^<]+)<\/desc>\s*<\/metadata>/);
+      if (!m) return;
+      const deviceId = m[1];
+      if (!trackpoints.has(deviceId)) trackpoints.set(deviceId, new Map());
+      const devMap = trackpoints.get(deviceId);
+      if (!devMap.has(today)) {
+        const points = loadExistingPoints(deviceId, today);
+        devMap.set(today, points);
+      }
+    } catch {}
+  });
 }
 
 // Ring buffer of the last 100 log lines for replaying to new connections
@@ -137,6 +166,9 @@ const wss = new WebSocket.Server({ server, path: '/ws' });
 // Key: deviceId (phone serial from GPSLogger %SER token)
 // Value: location object { deviceId, lat, lon, acc, batt, spd, alt, timestamp }
 const devices = new Map();
+
+// Populate trackpoints from today's GPX files before accepting connections
+preloadTodayTracks();
 
 // Serve index.html and any other static assets from the public/ folder
 app.use(express.static(path.join(__dirname, 'public')));
@@ -257,6 +289,20 @@ wss.on('connection', ws => {
 // Expose the app version from package.json
 const { version } = require('./package.json');
 app.get('/version', (req, res) => res.json({ version }));
+
+// Today's full track for all devices — used by the browser on initial load.
+// Returns { deviceId: [{lat, lon, time}, …], … }
+app.get('/tracks', (req, res) => {
+  const today = dateStr(Date.now());
+  const result = {};
+  trackpoints.forEach((devMap, deviceId) => {
+    const pts = devMap.get(today);
+    if (pts && pts.length > 0) {
+      result[deviceId] = pts.map(p => ({ lat: p.lat, lon: p.lon, time: p.time }));
+    }
+  });
+  res.json(result);
+});
 
 // Nickname endpoints — browser POSTs when user sets/clears a nickname.
 // Stored server-side so GPX filenames are correct even before the browser loads.
