@@ -341,21 +341,63 @@ app.get('/version', (req, res) => res.json({ version }));
 
 // GET /tracks — returns today's full point list for all known devices.
 // Response shape: { deviceId: [{ lat, lon, time, acc }, …], … }
-// Called by the browser in ws.onopen to load the day's GPS trail on page load.
+// Called by the browser immediately on page load (and again on WS reconnect).
+//
+// Reads directly from the GPX files on disk rather than from the in-memory Map
+// so the response is always accurate even if preloadTodayTracks() missed a file.
+// In-memory points added since the last GPX write are merged in on top.
 app.get('/tracks', (req, res) => {
   const today  = dateStr(Date.now());
   const result = {};
+
+  // ① Read every GPX file in today's folder from disk
+  const dir = path.join(GPX_DIR, today);
+  if (fs.existsSync(dir)) {
+    fs.readdirSync(dir).filter(f => f.endsWith('.gpx')).forEach(file => {
+      try {
+        const content = fs.readFileSync(path.join(dir, file), 'utf8');
+
+        // Identify the device from <metadata><desc>deviceId</desc>
+        let deviceId = (content.match(/<metadata>\s*<desc>([^<]+)<\/desc>\s*<\/metadata>/) || [])[1];
+        // Fallback: extract from <name>Label (deviceId) — date</name>
+        if (!deviceId) {
+          deviceId = (content.match(/<name>[^(]*\(([^)]+)\)/) || [])[1];
+        }
+        if (!deviceId) return;
+
+        const points = [];
+        const re = /<trkpt lat="([^"]+)" lon="([^"]+)">([\s\S]*?)<\/trkpt>/g;
+        let m;
+        while ((m = re.exec(content)) !== null) {
+          const inner = m[3];
+          points.push({
+            lat:  parseFloat(m[1]),
+            lon:  parseFloat(m[2]),
+            time: (inner.match(/<time>([^<]+)<\/time>/)   || [])[1] ?? new Date().toISOString(),
+            acc:  null, // accuracy is not persisted in GPX
+          });
+        }
+
+        if (points.length > 0) result[deviceId] = points;
+      } catch {}
+    });
+  }
+
+  // ② Merge any in-memory points that haven't been flushed to disk yet
+  // (in practice writeGpx is synchronous so this is rarely needed, but
+  //  it ensures the very latest point is always included)
   trackpoints.forEach((devMap, deviceId) => {
     const pts = devMap.get(today);
-    if (pts && pts.length > 0) {
-      result[deviceId] = pts.map(p => ({
-        lat:  p.lat,
-        lon:  p.lon,
-        time: p.time,
-        acc:  p.acc ?? null,
-      }));
+    if (!pts || pts.length === 0) return;
+    const diskCount = result[deviceId]?.length ?? 0;
+    const extra = pts.slice(diskCount).map(p => ({
+      lat: p.lat, lon: p.lon, time: p.time, acc: p.acc ?? null,
+    }));
+    if (extra.length > 0) {
+      result[deviceId] = [...(result[deviceId] || []), ...extra];
     }
   });
+
   res.json(result);
 });
 
