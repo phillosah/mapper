@@ -5,6 +5,107 @@ const path = require('path');
 const fs = require('fs');
 
 const LOG_FILE = path.join(__dirname, 'mapper.log');
+const NICKNAMES_FILE = path.join(__dirname, 'nicknames.json');
+const GPX_DIR = path.join(__dirname, 'gpx');
+
+// ── Nicknames ─────────────────────────────────────────────────────────────────
+// Persisted to nicknames.json so GPX filenames survive server restarts.
+let nicknames = {};
+try { nicknames = JSON.parse(fs.readFileSync(NICKNAMES_FILE, 'utf8')); } catch {}
+
+function saveNicknames() {
+  fs.writeFileSync(NICKNAMES_FILE, JSON.stringify(nicknames, null, 2));
+}
+
+// ── GPX tracking ──────────────────────────────────────────────────────────────
+// In-memory trackpoints per device per date. Loaded from existing files on
+// first access so a server restart doesn't overwrite the day's track.
+// Structure: Map<deviceId, Map<dateStr, Array<{lat,lon,ele,spd,time}>>>
+const trackpoints = new Map();
+
+function dateStr(ts) {
+  return new Date(ts).toISOString().slice(0, 10);
+}
+
+function safeName(str) {
+  // Strip characters illegal on Windows/Linux filenames
+  return str.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+}
+
+function gpxFilePath(deviceId, date) {
+  const nick = nicknames[deviceId];
+  const base = nick ? `${safeName(nick)} - ${safeName(deviceId)}` : safeName(deviceId);
+  return path.join(GPX_DIR, date, `${base}.gpx`);
+}
+
+function loadExistingPoints(deviceId, date) {
+  // Read today's file (if any) and parse trackpoints so a restart doesn't lose them.
+  try {
+    const content = fs.readFileSync(gpxFilePath(deviceId, date), 'utf8');
+    const points = [];
+    const re = /<trkpt lat="([^"]+)" lon="([^"]+)">([\s\S]*?)<\/trkpt>/g;
+    let m;
+    while ((m = re.exec(content)) !== null) {
+      const inner = m[3];
+      points.push({
+        lat: parseFloat(m[1]),
+        lon: parseFloat(m[2]),
+        ele: inner.match(/<ele>([^<]+)<\/ele>/)?.[1] ?? null,
+        spd: inner.match(/<speed>([^<]+)<\/speed>/)?.[1] ?? null,
+        time: inner.match(/<time>([^<]+)<\/time>/)?.[1] ?? new Date().toISOString(),
+      });
+    }
+    return points;
+  } catch {
+    return [];
+  }
+}
+
+function writeGpx(deviceId, date) {
+  const points = trackpoints.get(deviceId)?.get(date);
+  if (!points || points.length === 0) return;
+
+  const filePath = gpxFilePath(deviceId, date);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+
+  const label = nicknames[deviceId] || deviceId;
+  const trkpts = points.map(p => {
+    let s = `    <trkpt lat="${p.lat}" lon="${p.lon}">`;
+    if (p.ele != null) s += `\n      <ele>${p.ele}</ele>`;
+    s += `\n      <time>${p.time}</time>`;
+    if (p.spd != null) s += `\n      <extensions><speed>${parseFloat(p.spd).toFixed(3)}</speed></extensions>`;
+    s += `\n    </trkpt>`;
+    return s;
+  }).join('\n');
+
+  const gpx =
+`<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="Mapper" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>${label} (${deviceId}) \u2014 ${date}</name>
+    <trkseg>
+${trkpts}
+    </trkseg>
+  </trk>
+</gpx>`;
+
+  fs.writeFileSync(filePath, gpx, 'utf8');
+}
+
+function addTrackpoint(data) {
+  const date = dateStr(data.timestamp);
+  if (!trackpoints.has(data.deviceId)) trackpoints.set(data.deviceId, new Map());
+  const devMap = trackpoints.get(data.deviceId);
+  if (!devMap.has(date)) devMap.set(date, loadExistingPoints(data.deviceId, date));
+  devMap.get(date).push({
+    lat: data.lat,
+    lon: data.lon,
+    ele: data.alt,
+    spd: data.spd,
+    time: new Date(data.timestamp).toISOString(),
+  });
+  writeGpx(data.deviceId, date);
+}
 
 // Ring buffer of the last 100 log lines for replaying to new connections
 const logBuffer = [];
@@ -72,6 +173,7 @@ app.get('/location', (req, res) => {
   // Push the update to every browser that is currently connected
   broadcast({ type: 'location', ...data });
   logUpdate(data);
+  addTrackpoint(data);
 
   // GPSLogger only checks for a 200 status; the body content doesn't matter
   res.send('OK');
@@ -110,6 +212,7 @@ app.post('/owntracks', (req, res) => {
   devices.set(deviceId, data);
   broadcast({ type: 'location', ...data });
   logUpdate(data);
+  addTrackpoint(data);
 
   // OwnTracks expects an empty JSON array response
   res.json([]);
@@ -141,6 +244,37 @@ wss.on('connection', ws => {
 // Expose the app version from package.json
 const { version } = require('./package.json');
 app.get('/version', (req, res) => res.json({ version }));
+
+// Nickname endpoints — browser POSTs when user sets/clears a nickname.
+// Stored server-side so GPX filenames are correct even before the browser loads.
+app.get('/nicknames', (req, res) => res.json(nicknames));
+
+app.post('/nickname', (req, res) => {
+  const { deviceId, nickname } = req.body;
+  if (!deviceId) return res.status(400).json({ error: 'deviceId required' });
+
+  const today = dateStr(Date.now());
+
+  // Rename today's GPX file if it already exists under the old name
+  const oldPath = gpxFilePath(deviceId, today);
+  const oldExists = fs.existsSync(oldPath);
+
+  if (nickname) {
+    nicknames[deviceId] = nickname;
+  } else {
+    delete nicknames[deviceId];
+  }
+  saveNicknames();
+
+  if (oldExists) {
+    const newPath = gpxFilePath(deviceId, today);
+    if (oldPath !== newPath) {
+      try { fs.renameSync(oldPath, newPath); } catch {}
+    }
+  }
+
+  res.json({ ok: true });
+});
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {

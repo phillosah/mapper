@@ -206,6 +206,15 @@
       .then(r => r.json())
       .then(({ version }) => { document.getElementById('version').textContent = 'v' + version; });
 
+    // ── Nickname server sync ──────────────────────────────────────────────────
+    // Load server-persisted nicknames on startup (merges into localStorage copy)
+    fetch('/nicknames')
+      .then(r => r.json())
+      .then(serverNicks => {
+        Object.assign(nicknames, serverNicks);
+        saveNicknames();
+      });
+
     // ── Map ───────────────────────────────────────────────────────────────────
     const map = L.map('map').setView([20, 0], 2);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -274,6 +283,12 @@
       saveNicknames();
       updateSidebar();
       refreshPopup(id);
+      // Persist to server so GPX filenames stay correct
+      fetch('/nickname', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: id, nickname: val || null }),
+      });
     }
 
     // ── Sidebar rendering ─────────────────────────────────────────────────────
