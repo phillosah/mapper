@@ -2,6 +2,28 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
+const fs = require('fs');
+
+const LOG_FILE = path.join(__dirname, 'mapper.log');
+
+// Ring buffer of the last 100 log lines for replaying to new connections
+const logBuffer = [];
+
+function logUpdate(data) {
+  const time = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const parts = [`[${time}] ${data.deviceId} →`];
+  parts.push(`${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}`);
+  if (data.batt !== null) parts.push(`batt=${data.batt}%`);
+  if (data.spd !== null) parts.push(`spd=${(data.spd * 3.6).toFixed(1)}km/h`);
+  if (data.acc !== null) parts.push(`acc=±${data.acc}m`);
+  if (data.alt !== null) parts.push(`alt=${data.alt}m`);
+  const line = parts.join(' ');
+
+  fs.appendFile(LOG_FILE, line + '\n', () => {});
+  logBuffer.push(line);
+  if (logBuffer.length > 100) logBuffer.shift();
+  broadcast({ type: 'log', message: line });
+}
 
 const app = express();
 // Wrap Express in a plain http.Server so we can share it with the WebSocket server
@@ -49,6 +71,7 @@ app.get('/location', (req, res) => {
 
   // Push the update to every browser that is currently connected
   broadcast({ type: 'location', ...data });
+  logUpdate(data);
 
   // GPSLogger only checks for a 200 status; the body content doesn't matter
   res.send('OK');
@@ -86,6 +109,7 @@ app.post('/owntracks', (req, res) => {
 
   devices.set(deviceId, data);
   broadcast({ type: 'location', ...data });
+  logUpdate(data);
 
   // OwnTracks expects an empty JSON array response
   res.json([]);
@@ -107,6 +131,10 @@ function broadcast(data) {
 wss.on('connection', ws => {
   devices.forEach(data => {
     ws.send(JSON.stringify({ type: 'location', ...data }));
+  });
+  // Replay the last 10 log lines so the bar is populated immediately
+  logBuffer.slice(-10).forEach(line => {
+    ws.send(JSON.stringify({ type: 'log', message: line }));
   });
 });
 

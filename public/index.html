@@ -8,8 +8,9 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    /* Full-height flex layout: sidebar on the left, map fills the rest */
-    body { display: flex; height: 100vh; font-family: sans-serif; }
+    /* Full-height column layout: main row on top, log bar at the bottom */
+    body { display: flex; flex-direction: column; height: 100vh; font-family: sans-serif; }
+    #main { display: flex; flex: 1; min-height: 0; }
 
     #sidebar {
       width: 260px;
@@ -70,17 +71,43 @@
       border-top: 1px solid #313244;
     }
     #map { flex: 1; }
+    /* Log bar — spans full width at the bottom */
+    #log-bar {
+      height: 152px;
+      background: #11111b;
+      border-top: 2px solid #313244;
+      padding: 6px 12px;
+      font-family: monospace;
+      font-size: 0.72rem;
+      color: #a6e3a1;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+    #log-bar .log-header {
+      color: #6c7086;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 0.65rem;
+      margin-bottom: 4px;
+    }
+    #log-lines div { padding: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   </style>
 </head>
 <body>
-  <div id="sidebar">
-    <h1>&#x1F4CD; Mapper</h1>
-    <h2>Devices</h2>
-    <!-- Device cards are injected here by updateSidebar() -->
-    <div id="device-list"><div class="device-meta" style="padding:12px 16px">No devices yet</div></div>
-    <div id="status">Connecting...</div>
+  <div id="main">
+    <div id="sidebar">
+      <h1>&#x1F4CD; Mapper</h1>
+      <h2>Devices</h2>
+      <!-- Device cards are injected here by updateSidebar() -->
+      <div id="device-list"><div class="device-meta" style="padding:12px 16px">No devices yet</div></div>
+      <div id="status">Connecting...</div>
+    </div>
+    <div id="map"></div>
   </div>
-  <div id="map"></div>
+  <div id="log-bar">
+    <div class="log-header">Device log</div>
+    <div id="log-lines"></div>
+  </div>
 
   <!-- Leaflet JS — must load after the CSS above -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -190,6 +217,7 @@
       ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.type === 'location') onLocation(data);
+        if (data.type === 'log') addLog(data.message);
       };
 
       ws.onclose = () => {
@@ -200,6 +228,16 @@
 
       // Trigger onclose (and therefore the retry) on any socket error
       ws.onerror = () => ws.close();
+    }
+
+    // Keep last 10 log lines and render them into the log bar
+    const logLines = [];
+    function addLog(message) {
+      logLines.push(message);
+      if (logLines.length > 10) logLines.shift();
+      const el = document.getElementById('log-lines');
+      el.innerHTML = logLines.map(l => `<div>${l}</div>`).join('');
+      el.scrollTop = el.scrollHeight;
     }
 
     connect();
