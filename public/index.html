@@ -224,8 +224,21 @@
 
     // Live Leaflet marker objects, keyed by deviceId
     const markers = {};
+    // Leaflet polyline objects, keyed by deviceId
+    const polylines = {};
+    // Raw latlng arrays backing each polyline, keyed by deviceId
+    const trackLatLngs = {};
     // Latest location data for each device, keyed by deviceId
     const deviceData = {};
+
+    // Distinct colours cycled per device
+    const TRACK_COLOURS = ['#f38ba8','#89b4fa','#a6e3a1','#fab387','#cba6f7','#f9e2af','#89dceb','#74c7ec'];
+    let colourIdx = 0;
+    const deviceColour = {};
+    function getColour(id) {
+      if (!deviceColour[id]) deviceColour[id] = TRACK_COLOURS[colourIdx++ % TRACK_COLOURS.length];
+      return deviceColour[id];
+    }
     // Nicknames stored in localStorage: { deviceId: nickname }
     const nicknames = JSON.parse(localStorage.getItem('mapper_nicknames') || '{}');
 
@@ -348,6 +361,32 @@
       }
     }
 
+    // ── Track polylines ───────────────────────────────────────────────────────
+    function ensurePolyline(id) {
+      if (!polylines[id]) {
+        trackLatLngs[id] = [];
+        polylines[id] = L.polyline([], {
+          color: getColour(id),
+          weight: 3,
+          opacity: 0.75,
+        }).addTo(map);
+      }
+    }
+
+    // Full track replay sent on connect
+    function onTrack(data) {
+      ensurePolyline(data.deviceId);
+      trackLatLngs[data.deviceId] = data.points.map(p => [p.lat, p.lon]);
+      polylines[data.deviceId].setLatLngs(trackLatLngs[data.deviceId]);
+    }
+
+    // Single new point broadcast on each update
+    function onTrackpoint(data) {
+      ensurePolyline(data.deviceId);
+      trackLatLngs[data.deviceId].push([data.lat, data.lon]);
+      polylines[data.deviceId].setLatLngs(trackLatLngs[data.deviceId]);
+    }
+
     // ── Location updates ──────────────────────────────────────────────────────
     function onLocation(data) {
       deviceData[data.deviceId] = data;
@@ -377,6 +416,8 @@
         const data = JSON.parse(event.data);
         if (data.type === 'location') onLocation(data);
         if (data.type === 'log') addLog(data.message);
+        if (data.type === 'track') onTrack(data);
+        if (data.type === 'trackpoint') onTrackpoint(data);
       };
 
       ws.onclose = () => {

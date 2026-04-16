@@ -105,6 +105,7 @@ function addTrackpoint(data) {
     time: new Date(data.timestamp).toISOString(),
   });
   writeGpx(data.deviceId, date);
+  broadcast({ type: 'trackpoint', deviceId: data.deviceId, lat: data.lat, lon: data.lon });
 }
 
 // Ring buffer of the last 100 log lines for replaying to new connections
@@ -234,6 +235,18 @@ function broadcast(data) {
 wss.on('connection', ws => {
   devices.forEach(data => {
     ws.send(JSON.stringify({ type: 'location', ...data }));
+  });
+  // Send today's full track for each device so the polyline is drawn immediately
+  const today = dateStr(Date.now());
+  trackpoints.forEach((devMap, deviceId) => {
+    const points = devMap.get(today);
+    if (points && points.length > 0) {
+      ws.send(JSON.stringify({
+        type: 'track',
+        deviceId,
+        points: points.map(p => ({ lat: p.lat, lon: p.lon })),
+      }));
+    }
   });
   // Replay the last 10 log lines so the bar is populated immediately
   logBuffer.slice(-10).forEach(line => {
