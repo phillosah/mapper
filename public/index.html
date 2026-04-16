@@ -8,11 +8,18 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    /* Full-height column layout: main row on top, log bar at the bottom */
-    body { display: flex; flex-direction: column; height: 100vh; font-family: sans-serif; }
+
+    /*
+     * Full-height column layout:
+     *   body (column)
+     *     #main (row, flex:1)        — sidebar + map side by side
+     *     #log-bar (fixed height)    — update log pinned at the bottom
+     */
+    body  { display: flex; flex-direction: column; height: 100vh; font-family: sans-serif; }
     #main { display: flex; flex: 1; min-height: 0; }
 
-    /* ── Sidebar ── */
+    /* ── Sidebar ─────────────────────────────────────────────────────────────── */
+
     #sidebar {
       width: 260px;
       background: #1e1e2e;
@@ -20,12 +27,14 @@
       display: flex;
       flex-direction: column;
       flex-shrink: 0;
+      /* Smooth collapse/expand animation */
       transition: width 0.22s ease;
       overflow: hidden;
     }
+    /* Collapsed sidebar shows only the toggle arrow */
     #sidebar.collapsed { width: 36px; }
 
-    /* Header row: title + toggle button */
+    /* Header row: app title on the left, collapse button on the right */
     #sidebar-header {
       display: flex;
       align-items: center;
@@ -42,12 +51,15 @@
       white-space: nowrap;
       overflow: hidden;
     }
+    /* Small grey version number shown next to the title */
     #sidebar-title .version {
       font-size: 0.65rem;
       color: #6c7086;
       margin-left: 6px;
       vertical-align: middle;
     }
+
+    /* Arrow button that collapses/expands the sidebar */
     #toggle-btn {
       background: none;
       border: none;
@@ -61,7 +73,11 @@
     }
     #toggle-btn:hover { color: #89b4fa; }
 
-    /* Inner content hidden when collapsed */
+    /*
+     * #sidebar-inner wraps the device list and status bar.
+     * It is hidden (visibility:hidden) when collapsed so the toggle button
+     * remains clickable but no content leaks into the narrow rail.
+     */
     #sidebar-inner {
       display: flex;
       flex-direction: column;
@@ -79,16 +95,21 @@
       color: #6c7086;
       flex-shrink: 0;
     }
+
+    /* Device list scrolls if there are more cards than the sidebar can show */
     #device-list { flex: 1; overflow-y: auto; }
 
-    /* ── Device cards ── */
+    /* ── Device cards ─────────────────────────────────────────────────────────── */
+
     .device-card {
       padding: 10px 16px;
       border-bottom: 1px solid #181825;
-      cursor: pointer;
+      cursor: pointer;          /* clicking the card pans the map to that device */
       transition: background 0.15s;
     }
     .device-card:hover { background: #313244; }
+
+    /* Top row of a card: status dot · name · edit pencil · GPX download */
     .device-name-row {
       display: flex;
       align-items: center;
@@ -104,6 +125,8 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+
+    /* Small icon buttons (pencil = edit nickname, ⇩ = download GPX) */
     .edit-btn, .gpx-btn {
       background: none;
       border: none;
@@ -117,7 +140,9 @@
       line-height: 1;
     }
     .edit-btn:hover { color: #cba6f7; }
-    .gpx-btn:hover { color: #a6e3a1; }
+    .gpx-btn:hover  { color: #a6e3a1; }
+
+    /* Inline text input that appears when editing a nickname */
     .nickname-input {
       flex: 1;
       background: #181825;
@@ -130,22 +155,26 @@
       outline: none;
       min-width: 0;
     }
-    .device-meta {
-      font-size: 0.75rem;
-      color: #6c7086;
-      line-height: 1.6;
-    }
+
+    /* Secondary device info: coords, battery, speed, accuracy, timestamp */
+    .device-meta { font-size: 0.75rem; color: #6c7086; line-height: 1.6; }
     .device-meta span { margin-right: 8px; }
-    /* Green dot shown next to each device name to indicate it is active */
+
+    /*
+     * Status dot shown next to the device name.
+     * Colour is set dynamically via inline style:
+     *   green (#a6e3a1) = last update within 5 minutes
+     *   red   (#f38ba8) = last update more than 5 minutes ago
+     */
     .dot {
       display: inline-block;
       width: 8px; height: 8px;
       border-radius: 50%;
-      background: #a6e3a1;
+      background: #a6e3a1; /* default; overridden per-card in updateSidebar() */
       flex-shrink: 0;
     }
 
-    /* Connection status bar at the bottom of the sidebar */
+    /* Connection status line at the bottom of the sidebar */
     #status {
       padding: 10px 16px;
       font-size: 0.75rem;
@@ -154,9 +183,15 @@
       flex-shrink: 0;
     }
 
+    /* Map fills all remaining horizontal space */
     #map { flex: 1; }
 
-    /* ── Log bar ── */
+    /* ── Log bar ──────────────────────────────────────────────────────────────── */
+    /*
+     * Fixed-height monospace panel at the very bottom of the viewport.
+     * Shows the last 10 device update log lines, newest at the bottom.
+     * Text is green-on-dark to look like a terminal.
+     */
     #log-bar {
       height: 152px;
       background: #11111b;
@@ -175,25 +210,38 @@
       font-size: 0.65rem;
       margin-bottom: 4px;
     }
-    #log-lines div { padding: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    /* Truncate long lines rather than wrapping (keeps rows clean) */
+    #log-lines div {
+      padding: 1px 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
   </style>
 </head>
 <body>
+  <!-- Main row: sidebar on the left, Leaflet map on the right -->
   <div id="main">
     <div id="sidebar">
+      <!-- Header: app title with version + collapse button -->
       <div id="sidebar-header">
         <span id="sidebar-title">&#x1F4CD; Mapper <span class="version" id="version"></span></span>
         <button id="toggle-btn" onclick="toggleSidebar()" title="Toggle sidebar">&#x25C0;</button>
       </div>
       <div id="sidebar-inner">
         <h2>Devices</h2>
-        <!-- Device cards are injected here by updateSidebar() -->
-        <div id="device-list"><div class="device-meta" style="padding:12px 16px">No devices yet</div></div>
+        <!-- Device cards injected by updateSidebar() -->
+        <div id="device-list">
+          <div class="device-meta" style="padding:12px 16px">No devices yet</div>
+        </div>
+        <!-- WebSocket connection status -->
         <div id="status">Connecting...</div>
       </div>
     </div>
     <div id="map"></div>
   </div>
+
+  <!-- Log bar: last 10 GPS update lines from the server -->
   <div id="log-bar">
     <div class="log-header">Device log</div>
     <div id="log-lines"></div>
@@ -202,83 +250,165 @@
   <!-- Leaflet JS — must load after the CSS above -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-    // ── Version ──────────────────────────────────────────────────────────────
+    // ── Version display ───────────────────────────────────────────────────────
+    // Fetch the version string from the server and show it in the header.
+    // The version is stored in package.json and served via GET /version.
     fetch('/version')
       .then(r => r.json())
-      .then(({ version }) => { document.getElementById('version').textContent = 'v' + version; });
-
-    // ── Nickname server sync ──────────────────────────────────────────────────
-    // Load server-persisted nicknames on startup (merges into localStorage copy)
-    fetch('/nicknames')
-      .then(r => r.json())
-      .then(serverNicks => {
-        Object.assign(nicknames, serverNicks);
-        saveNicknames();
+      .then(({ version }) => {
+        document.getElementById('version').textContent = 'v' + version;
       });
 
-    // ── Map ───────────────────────────────────────────────────────────────────
+    // ── Map initialisation ────────────────────────────────────────────────────
+    // Start zoomed out to show the whole world; the map auto-pans to the first
+    // device that appears.
     const map = L.map('map').setView([20, 0], 2);
+
+    // OpenStreetMap tiles — free, no API key required
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       maxZoom: 19,
     }).addTo(map);
 
-    // Live Leaflet marker objects, keyed by deviceId
+    // ── Shared state ──────────────────────────────────────────────────────────
+
+    // Live Leaflet marker objects for each device's current position
+    // { deviceId: L.Marker }
     const markers = {};
-    // Leaflet polyline objects, keyed by deviceId
+
+    // Leaflet polyline for each device's track (the line connecting all positions)
+    // { deviceId: L.Polyline }
     const polylines = {};
-    // Raw latlng arrays backing each polyline, keyed by deviceId
+
+    // Raw [lat, lon] array that backs each polyline — kept in sync with the
+    // polyline so we can append new points without rebuilding from scratch
+    // { deviceId: [[lat, lon], …] }
     const trackLatLngs = {};
-    // Latest location data for each device, keyed by deviceId
+
+    // Most recent location data received from the server for each device
+    // { deviceId: { deviceId, lat, lon, acc, batt, spd, alt, timestamp } }
     const deviceData = {};
 
-    // Distinct colours cycled per device
-    const TRACK_COLOURS = ['#f38ba8','#89b4fa','#a6e3a1','#fab387','#cba6f7','#f9e2af','#89dceb','#74c7ec'];
+    // ── Colour assignment ─────────────────────────────────────────────────────
+    // Each device gets a distinct colour from this palette, assigned on first
+    // encounter and kept consistent for the whole session.
+    const TRACK_COLOURS = [
+      '#f38ba8', // red
+      '#89b4fa', // blue
+      '#a6e3a1', // green
+      '#fab387', // orange
+      '#cba6f7', // purple
+      '#f9e2af', // yellow
+      '#89dceb', // cyan
+      '#74c7ec', // sky
+    ];
     let colourIdx = 0;
     const deviceColour = {};
+
+    // Returns the assigned colour for a device, allocating one if needed
     function getColour(id) {
-      if (!deviceColour[id]) deviceColour[id] = TRACK_COLOURS[colourIdx++ % TRACK_COLOURS.length];
+      if (!deviceColour[id]) {
+        deviceColour[id] = TRACK_COLOURS[colourIdx++ % TRACK_COLOURS.length];
+      }
       return deviceColour[id];
     }
-    // Nicknames stored in localStorage: { deviceId: nickname }
+
+    // ── Nicknames ─────────────────────────────────────────────────────────────
+    // Nicknames are stored in two places:
+    //   1. localStorage — survives page reloads in the same browser
+    //   2. Server's nicknames.json — survives server restarts and syncs across browsers
+    // On load we merge both, with the server copy taking precedence.
     const nicknames = JSON.parse(localStorage.getItem('mapper_nicknames') || '{}');
 
+    // Persist the current nickname map to localStorage
     function saveNicknames() {
       localStorage.setItem('mapper_nicknames', JSON.stringify(nicknames));
     }
 
+    // Returns the nickname for a device, or the raw device ID if none is set
     function getLabel(id) {
       return nicknames[id] || id;
     }
 
-    // ── Sidebar toggle ────────────────────────────────────────────────────────
+    // Merge server-persisted nicknames into the local copy on page load.
+    // Runs in parallel with the map setup — order doesn't matter here.
+    fetch('/nicknames')
+      .then(r => r.json())
+      .then(serverNicks => {
+        Object.assign(nicknames, serverNicks); // server wins on conflicts
+        saveNicknames();
+      });
+
+    // ── Sidebar collapse / expand ─────────────────────────────────────────────
     function toggleSidebar() {
       const sidebar = document.getElementById('sidebar');
-      const btn = document.getElementById('toggle-btn');
+      const btn     = document.getElementById('toggle-btn');
       sidebar.classList.toggle('collapsed');
+      // Flip the arrow direction to indicate the current state
       btn.innerHTML = sidebar.classList.contains('collapsed') ? '&#x25B6;' : '&#x25C0;';
-      // Notify Leaflet that the map container resized
-      setTimeout(() => map.invalidateSize(), 230);
+      // Tell Leaflet the map container changed size so it redraws tiles correctly
+      setTimeout(() => map.invalidateSize(), 230); // wait for CSS transition to finish
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── Time formatting ───────────────────────────────────────────────────────
+
+    // Returns an absolute HH:MM:SS string (used in popups)
     function formatTime(ts) {
       return new Date(ts).toLocaleTimeString();
     }
 
-    // Returns "just now", "X min ago", or the absolute time if > 60 min old
+    // Returns a human-friendly relative string for the sidebar:
+    //   < 30 s  → "just now"
+    //   < 60 m  → "X min ago"
+    //   older   → absolute time (HH:MM:SS)
     function relativeTime(ts) {
       const sec = Math.floor((Date.now() - ts) / 1000);
-      if (sec < 30) return 'just now';
+      if (sec < 30)   return 'just now';
       if (sec < 3600) return `${Math.floor(sec / 60)} min ago`;
       return new Date(ts).toLocaleTimeString();
     }
 
+    // ── Freshness ─────────────────────────────────────────────────────────────
+    // A device is considered "fresh" if its last update arrived within 5 minutes.
+    // Fresh = green marker/dot.  Stale = red marker/dot.
+    const FRESH_MS = 5 * 60 * 1000; // 5 minutes in milliseconds
+
+    function isFresh(id) {
+      const d = deviceData[id];
+      return d && (Date.now() - d.timestamp) < FRESH_MS;
+    }
+
+    // ── Live marker icon ──────────────────────────────────────────────────────
+    // Replaces the default Leaflet pin with a small filled circle.
+    // Colour encodes freshness: green = fresh, red = stale.
+    function liveIcon(id) {
+      const colour = isFresh(id) ? '#a6e3a1' : '#f38ba8';
+      return L.divIcon({
+        className: '', // suppress Leaflet's default white box
+        html: `<div style="
+          width:16px; height:16px;
+          border-radius:50%;
+          background:${colour};
+          border:2.5px solid white;
+          box-shadow:0 1px 5px rgba(0,0,0,0.5)
+        "></div>`,
+        iconSize:    [16, 16],
+        iconAnchor:  [8, 8],   // centre of the circle sits on the coordinate
+        popupAnchor: [0, -10], // popup appears just above the circle
+      });
+    }
+
+    // Re-applies the current freshness colour to an existing live marker
+    function updateMarkerColour(id) {
+      if (markers[id]) markers[id].setIcon(liveIcon(id));
+    }
+
     // ── Nickname editing ──────────────────────────────────────────────────────
-    // Called when the edit pencil is clicked on a device card
+
+    // Replaces the device name row with an inline text input when the pencil is clicked
     function startEdit(event, id) {
-      event.stopPropagation(); // don't trigger focusDevice
-      const row = document.getElementById('name-row-' + id);
+      event.stopPropagation(); // prevent the click from also triggering focusDevice()
+      const row     = document.getElementById('name-row-' + id);
       const current = nicknames[id] || '';
       row.innerHTML = `
         <span class="dot"></span>
@@ -289,60 +419,83 @@
       `;
       const input = document.getElementById('nick-input-' + id);
       input.focus();
-      input.select();
+      input.select(); // pre-select existing text so the user can type straight away
     }
 
+    // Keyboard shortcuts while the nickname input is focused:
+    //   Enter  → confirm (triggers blur → commitEdit)
+    //   Escape → cancel  (marks the input then triggers blur → commitEdit bails out)
     function handleNickKey(event, id) {
-      if (event.key === 'Enter') { event.target.blur(); }
+      if (event.key === 'Enter')  { event.target.blur(); }
       if (event.key === 'Escape') { event.target.dataset.cancel = '1'; event.target.blur(); }
     }
 
-    function downloadGpx(event, id) {
-      event.stopPropagation();
-      const a = document.createElement('a');
-      a.href = `/gpx/${encodeURIComponent(id)}`;
-      a.download = '';
-      a.click();
-    }
-
+    // Saves the edited nickname and syncs it to the server.
+    // Called by the input's onblur event (after Enter, Escape, or clicking away).
     function commitEdit(id) {
       const input = document.getElementById('nick-input-' + id);
-      if (!input || input.dataset.cancel === '1') { updateSidebar(); return; }
+      if (!input || input.dataset.cancel === '1') {
+        updateSidebar(); // restore the card without saving
+        return;
+      }
       const val = input.value.trim();
       if (val) { nicknames[id] = val; } else { delete nicknames[id]; }
-      saveNicknames();
-      updateSidebar();
-      refreshPopup(id);
-      // Persist to server so GPX filenames stay correct
+      saveNicknames();     // persist to localStorage
+      updateSidebar();     // re-render the card with the new name
+      refreshPopup(id);    // update the open popup if the marker is clicked
+
+      // Persist to the server so GPX filenames and other browsers stay in sync
       fetch('/nickname', {
-        method: 'POST',
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deviceId: id, nickname: val || null }),
+        body:    JSON.stringify({ deviceId: id, nickname: val || null }),
       });
     }
 
+    // Triggers a file download of today's GPX track for a device.
+    // The server responds to GET /gpx/:deviceId with the file attachment.
+    function downloadGpx(event, id) {
+      event.stopPropagation(); // don't focus the device on the map
+      const a  = document.createElement('a');
+      a.href   = `/gpx/${encodeURIComponent(id)}`;
+      a.download = ''; // use the server-provided filename from Content-Disposition
+      a.click();
+    }
+
     // ── Sidebar rendering ─────────────────────────────────────────────────────
+    // Rebuilds the device list from scratch using the latest deviceData state.
+    // Called on every location update and every minute (for relative timestamps).
     function updateSidebar() {
       const list = document.getElementById('device-list');
-      const ids = Object.keys(deviceData);
+      const ids  = Object.keys(deviceData);
+
       if (ids.length === 0) {
         list.innerHTML = '<div class="device-meta" style="padding:12px 16px">No devices yet</div>';
         return;
       }
+
       list.innerHTML = ids.map(id => {
         const d = deviceData[id];
-        const label = getLabel(id);
+
+        // Only show fields that the server actually sent (null = not available)
         const batt = d.batt !== null ? `&#x1F50B; ${d.batt}%` : '';
         const spd  = d.spd  !== null ? `&#x1F3CE; ${(d.spd * 3.6).toFixed(1)} km/h` : '';
         const acc  = d.acc  !== null ? `&#x25CE; &plusmn;${d.acc}m` : '';
+
+        // Status dot colour reflects whether the device has pinged recently
         const freshDot = isFresh(id) ? '#a6e3a1' : '#f38ba8';
+
         return `
           <div class="device-card" onclick="focusDevice('${id}')">
             <div class="device-name-row" id="name-row-${id}">
               <span class="dot" style="background:${freshDot}"></span>
-              <span class="device-name">${label}</span>
-              <button class="edit-btn" onclick="startEdit(event,'${id}')" title="Set nickname">&#x270F;</button>
-              <button class="gpx-btn" onclick="downloadGpx(event,'${id}')" title="Download today&#39;s GPX">&#x21E9;</button>
+              <span class="device-name">${getLabel(id)}</span>
+              <button class="edit-btn"
+                      onclick="startEdit(event,'${id}')"
+                      title="Set nickname">&#x270F;</button>
+              <button class="gpx-btn"
+                      onclick="downloadGpx(event,'${id}')"
+                      title="Download today&#39;s GPX">&#x21E9;</button>
             </div>
             <div class="device-meta">
               <span>${d.lat.toFixed(5)}, ${d.lon.toFixed(5)}</span><br>
@@ -354,15 +507,21 @@
     }
 
     // ── Map interactions ──────────────────────────────────────────────────────
+
+    // Pans and zooms to a device when its sidebar card is clicked
     function focusDevice(id) {
       const d = deviceData[id];
       if (d) map.setView([d.lat, d.lon], 15);
     }
 
+    // Builds the HTML content for a device's map marker popup
     function popupContent(data) {
-      const id = data.deviceId;
+      const id    = data.deviceId;
       const label = getLabel(id);
-      const nick = nicknames[id] ? `<span style="color:#888;font-weight:normal;font-size:0.85em">(${id})</span>` : '';
+      // Show the raw device ID in small text next to the nickname (if set)
+      const nick  = nicknames[id]
+        ? `<span style="color:#888;font-weight:normal;font-size:0.85em">(${id})</span>`
+        : '';
       return `
         <b>${label}</b> ${nick}<br>
         ${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}<br>
@@ -374,49 +533,35 @@
       `;
     }
 
+    // Re-renders a marker's popup if it is currently open (e.g. after a nickname change)
     function refreshPopup(id) {
       if (markers[id] && markers[id].isPopupOpen()) {
         markers[id].setPopupContent(popupContent(deviceData[id]));
       }
     }
 
-    // ── Freshness ─────────────────────────────────────────────────────────────
-    const FRESH_MS = 5 * 60 * 1000; // 5 minutes
-    function isFresh(id) {
-      const d = deviceData[id];
-      return d && (Date.now() - d.timestamp) < FRESH_MS;
-    }
-
-    // ── Live marker icon (green = fresh, red = stale) ─────────────────────────
-    function liveIcon(id) {
-      const colour = isFresh(id) ? '#a6e3a1' : '#f38ba8';
-      return L.divIcon({
-        className: '',
-        html: `<div style="width:16px;height:16px;border-radius:50%;background:${colour};border:2.5px solid white;box-shadow:0 1px 5px rgba(0,0,0,0.5)"></div>`,
-        iconSize: [16, 16],
-        iconAnchor: [8, 8],
-        popupAnchor: [0, -10],
-      });
-    }
-
-    function updateMarkerColour(id) {
-      if (markers[id]) markers[id].setIcon(liveIcon(id));
-    }
-
     // ── Track polylines, history dots & accuracy circles ──────────────────────
-    // dotMarkers[id]      = array of L.circleMarker (one per historical position)
-    // accCircles[id]      = array of L.circle for historical accuracy rings
-    // liveAccCircle[id]   = single L.circle for the current position accuracy
-    const dotMarkers = {};
-    const accCircles = {};
-    const liveAccCircle = {};
+    //
+    // For each device there are several overlapping Leaflet layers:
+    //
+    //   polylines[id]       — thin coloured line connecting all positions in order
+    //   dotMarkers[id][]    — small filled circles at each historical position
+    //   accCircles[id][]    — transparent rings showing GPS accuracy at each point
+    //   liveAccCircle[id]   — a single larger accuracy ring under the live marker
+    //   markers[id]         — the live position marker (green/red circle)
 
+    const dotMarkers    = {}; // { deviceId: [L.CircleMarker, …] }
+    const accCircles    = {}; // { deviceId: [L.Circle, …] }
+    const liveAccCircle = {}; // { deviceId: L.Circle }
+
+    // Creates the polyline and initialises the dot/circle arrays for a device
+    // on its first appearance. Safe to call multiple times (idempotent).
     function ensurePolyline(id) {
       if (!polylines[id]) {
         trackLatLngs[id] = [];
-        polylines[id] = L.polyline([], {
-          color: getColour(id),
-          weight: 3,
+        polylines[id]    = L.polyline([], {
+          color:   getColour(id),
+          weight:  3,
           opacity: 0.75,
         }).addTo(map);
         dotMarkers[id] = [];
@@ -424,37 +569,46 @@
       }
     }
 
+    // Adds a single historical position dot and its accuracy ring to the map.
+    // Used both when loading the full day's history and for each new live point.
     function addDot(id, lat, lon, isoTime, acc) {
       const colour = getColour(id);
-      // Accuracy ring — radius in metres, projects correctly on the map
+
+      // Accuracy ring — L.circle radius is in metres, so it scales with zoom.
+      // Rendered as a very faint transparent fill so it doesn't obscure the map.
       if (acc != null && acc > 0) {
         const ring = L.circle([lat, lon], {
-          radius: acc,
-          color: colour,
-          fillColor: colour,
+          radius:      acc,
+          color:       colour,
+          fillColor:   colour,
           fillOpacity: 0.07,
-          weight: 1,
-          opacity: 0.35,
-          interactive: false,
+          weight:      1,
+          opacity:     0.35,
+          interactive: false, // ignore mouse events — clicking through to dots/map
         }).addTo(map);
         accCircles[id].push(ring);
       }
-      // Position dot
+
+      // Small filled circle marking the exact recorded position
       const dot = L.circleMarker([lat, lon], {
-        radius: 4,
-        color: colour,
-        fillColor: colour,
+        radius:      4,
+        color:       colour,
+        fillColor:   colour,
         fillOpacity: 0.85,
-        weight: 1,
+        weight:      1,
       }).bindPopup(
-        `<b>${getLabel(id)}</b><br>${lat.toFixed(5)}, ${lon.toFixed(5)}<br>`+
+        `<b>${getLabel(id)}</b><br>` +
+        `${lat.toFixed(5)}, ${lon.toFixed(5)}<br>` +
         (acc != null ? `Accuracy: &plusmn;${acc}m<br>` : '') +
         `<small>${new Date(isoTime).toLocaleTimeString()}</small>`,
         { maxWidth: 180 }
       ).addTo(map);
+
       dotMarkers[id].push(dot);
     }
 
+    // Removes all historical dots and accuracy rings for a device from the map.
+    // Called before re-loading a full track to avoid duplicates.
     function clearDots(id) {
       (dotMarkers[id] || []).forEach(d => d.remove());
       (accCircles[id]  || []).forEach(c => c.remove());
@@ -462,25 +616,30 @@
       accCircles[id]  = [];
     }
 
-    // Update the single accuracy circle shown under the live marker
+    // Updates the accuracy circle displayed under the live position marker.
+    // A new circle is created on each location update (radius may change).
     function updateLiveAccCircle(id, lat, lon, acc) {
+      // Remove the old circle first
       if (liveAccCircle[id]) { liveAccCircle[id].remove(); delete liveAccCircle[id]; }
+
       if (acc != null && acc > 0) {
         liveAccCircle[id] = L.circle([lat, lon], {
-          radius: acc,
-          color: getColour(id),
-          fillColor: getColour(id),
-          fillOpacity: 0.12,
-          weight: 1.5,
-          opacity: 0.5,
+          radius:      acc,
+          color:       getColour(id),
+          fillColor:   getColour(id),
+          fillOpacity: 0.12, // slightly more visible than historical rings
+          weight:      1.5,
+          opacity:     0.5,
           interactive: false,
         }).addTo(map);
-        // Keep circle beneath the marker
+        // Push the circle below other layers so the marker stays clickable
         liveAccCircle[id].bringToBack();
       }
     }
 
-    // Load a full track (array of {lat, lon, time, acc}) for a device
+    // Loads (or reloads) a complete set of track points for a device.
+    // Clears existing dots first to avoid duplicates when the page reconnects.
+    // points: [{ lat, lon, time, acc }, …]
     function loadTrack(id, points) {
       ensurePolyline(id);
       clearDots(id);
@@ -489,7 +648,8 @@
       points.forEach(p => addDot(id, p.lat, p.lon, p.time, p.acc));
     }
 
-    // Single new point broadcast on each update
+    // Appends a single new trackpoint received live from the server.
+    // Extends the polyline and adds a new dot without redrawing from scratch.
     function onTrackpoint(data) {
       ensurePolyline(data.deviceId);
       trackLatLngs[data.deviceId].push([data.lat, data.lon]);
@@ -497,19 +657,24 @@
       addDot(data.deviceId, data.lat, data.lon, data.time, data.acc);
     }
 
-    // ── Location updates ──────────────────────────────────────────────────────
+    // ── Live location update ──────────────────────────────────────────────────
+    // Handles a 'location' WebSocket message — moves or creates the live marker
+    // for the device and refreshes the sidebar.
     function onLocation(data) {
-      deviceData[data.deviceId] = data;
+      deviceData[data.deviceId] = data; // store latest state
       const id = data.deviceId;
 
       if (markers[id]) {
+        // Device already has a marker — move it to the new position
         markers[id].setLatLng([data.lat, data.lon]);
-        markers[id].setIcon(liveIcon(id));
+        markers[id].setIcon(liveIcon(id)); // refresh colour (freshness may have changed)
         if (markers[id].isPopupOpen()) markers[id].setPopupContent(popupContent(data));
       } else {
+        // First time seeing this device — create a marker
         markers[id] = L.marker([data.lat, data.lon], { icon: liveIcon(id) })
           .bindPopup(popupContent(data))
           .addTo(map);
+        // Auto-pan to the very first device only; don't hijack the view for subsequent ones
         if (Object.keys(deviceData).length === 1) map.setView([data.lat, data.lon], 14);
       }
 
@@ -517,54 +682,74 @@
       updateSidebar();
     }
 
-    // ── WebSocket ─────────────────────────────────────────────────────────────
+    // ── WebSocket connection ──────────────────────────────────────────────────
+    // Maintains a persistent WebSocket to the server for real-time updates.
+    // Automatically reconnects after 3 seconds if the connection drops,
+    // preserving all existing map markers and track lines during the gap.
     function connect() {
+      // Use wss:// (secure) when the page is served over HTTPS
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new WebSocket(`${proto}://${location.host}/ws`);
+      const ws    = new WebSocket(`${proto}://${location.host}/ws`);
 
       ws.onopen = () => {
         document.getElementById('status').textContent = 'Connected';
-        // Load today's full track via REST now that the connection is up.
-        // Doing this in onopen (rather than at page load) ensures the server
-        // has finished its preload and the in-memory trackpoints are ready.
-        fetch('/tracks')
-          .then(r => r.json())
-          .then(allTracks => {
-            Object.entries(allTracks).forEach(([id, points]) => loadTrack(id, points));
-          });
+        // Refresh the trail on every (re)connect in case tracks changed while disconnected
+        fetchTracks();
       };
 
       ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
-        if (data.type === 'location') onLocation(data);
-        if (data.type === 'log') addLog(data.message);
-        if (data.type === 'trackpoint') onTrackpoint(data);
+        if (data.type === 'location')   onLocation(data);   // live device position
+        if (data.type === 'trackpoint') onTrackpoint(data); // new point added to trail
+        if (data.type === 'log')        addLog(data.message); // update log entry
       };
 
       ws.onclose = () => {
-        document.getElementById('status').textContent = 'Disconnected — retrying...';
+        document.getElementById('status').textContent = 'Disconnected \u2014 retrying...';
+        // Retry after 3 s; existing markers remain visible during the gap
         setTimeout(connect, 3000);
       };
 
+      // Treat socket errors as a close so the retry logic kicks in
       ws.onerror = () => ws.close();
     }
 
     // ── Log bar ───────────────────────────────────────────────────────────────
+    // Maintains a rolling window of the last 10 log lines in the bottom bar.
     const logLines = [];
+
     function addLog(message) {
       logLines.push(message);
-      if (logLines.length > 10) logLines.shift();
+      if (logLines.length > 10) logLines.shift(); // keep only the last 10
       const el = document.getElementById('log-lines');
       el.innerHTML = logLines.map(l => `<div>${l}</div>`).join('');
-      el.scrollTop = el.scrollHeight;
+      el.scrollTop = el.scrollHeight; // auto-scroll to the newest line
     }
 
-    // Refresh sidebar and marker colours every minute
+    // ── Periodic refresh ──────────────────────────────────────────────────────
+    // Re-renders the sidebar every minute so relative timestamps ("2 min ago")
+    // stay accurate, and updates marker colours in case a device has gone stale.
     setInterval(() => {
       updateSidebar();
       Object.keys(deviceData).forEach(updateMarkerColour);
     }, 60000);
 
+    // ── Track loader ──────────────────────────────────────────────────────────
+    // Fetches today's full GPS trail for all devices from GET /tracks and
+    // draws it on the map. Called once on page load and again on every
+    // WebSocket reconnect so stale tabs catch up automatically.
+    function fetchTracks() {
+      fetch('/tracks')
+        .then(r => r.json())
+        .then(allTracks => {
+          Object.entries(allTracks).forEach(([id, points]) => loadTrack(id, points));
+        });
+    }
+
+    // Load the trail immediately on page load — don't wait for the WS handshake
+    fetchTracks();
+
+    // Kick off the WebSocket connection
     connect();
   </script>
 </body>

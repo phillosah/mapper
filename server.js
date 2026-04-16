@@ -1,66 +1,70 @@
-const express = require('express');
-const http = require('http');
-const WebSocket = require('ws');
-const path = require('path');
-const fs = require('fs');
+// ─────────────────────────────────────────────────────────────────────────────
+// Mapper — server.js
+//
+// Node.js HTTP + WebSocket server that:
+//   • Receives GPS location updates from GPSLogger (Android) and OwnTracks (iOS)
+//   • Broadcasts live updates to every connected browser via WebSocket
+//   • Writes per-device per-day GPX track files to disk
+//   • Persists device nicknames to nicknames.json
+//   • Serves the static frontend from public/
+// ─────────────────────────────────────────────────────────────────────────────
 
-const LOG_FILE = path.join(__dirname, 'mapper.log');
-const NICKNAMES_FILE = path.join(__dirname, 'nicknames.json');
-const GPX_DIR = path.join(__dirname, 'gpx');
+const express = require('express');
+const http    = require('http');
+const WebSocket = require('ws');
+const path    = require('path');
+const fs      = require('fs');
+
+// ── File paths ────────────────────────────────────────────────────────────────
+
+const LOG_FILE       = path.join(__dirname, 'mapper.log');   // append-only update log
+const NICKNAMES_FILE = path.join(__dirname, 'nicknames.json'); // { deviceId: nickname }
+const GPX_DIR        = path.join(__dirname, 'gpx');           // gpx/<date>/<name>.gpx
 
 // ── Nicknames ─────────────────────────────────────────────────────────────────
-// Persisted to nicknames.json so GPX filenames survive server restarts.
+// Nicknames are stored server-side so GPX filenames stay consistent even when
+// the browser hasn't loaded yet or a different browser is used.
+
 let nicknames = {};
-try { nicknames = JSON.parse(fs.readFileSync(NICKNAMES_FILE, 'utf8')); } catch {}
+try {
+  // Silently ignore if the file doesn't exist yet (first run)
+  nicknames = JSON.parse(fs.readFileSync(NICKNAMES_FILE, 'utf8'));
+} catch {}
 
 function saveNicknames() {
   fs.writeFileSync(NICKNAMES_FILE, JSON.stringify(nicknames, null, 2));
 }
 
 // ── GPX tracking ──────────────────────────────────────────────────────────────
-// In-memory trackpoints per device per date. Loaded from existing files on
-// first access so a server restart doesn't overwrite the day's track.
-// Structure: Map<deviceId, Map<dateStr, Array<{lat,lon,ele,spd,time}>>>
+// In-memory store of all trackpoints for the current day, organised as:
+//   Map<deviceId, Map<dateStr, Array<{ lat, lon, ele, acc, spd, time }>>>
+//
+// Points are accumulated here first, then written to disk as a full GPX file
+// on every update (simple and keeps the file always valid).
 const trackpoints = new Map();
 
+// Returns a YYYY-MM-DD string for a given Unix timestamp (local UTC date)
 function dateStr(ts) {
   return new Date(ts).toISOString().slice(0, 10);
 }
 
+// Removes characters that are illegal in filenames on Windows and Linux
 function safeName(str) {
-  // Strip characters illegal on Windows/Linux filenames
   return str.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
 }
 
+// Builds the full path for a device's GPX file for a given date.
+// Example: gpx/2026-04-16/Phil - ABC123.gpx
 function gpxFilePath(deviceId, date) {
   const nick = nicknames[deviceId];
-  const base = nick ? `${safeName(nick)} - ${safeName(deviceId)}` : safeName(deviceId);
+  const base = nick
+    ? `${safeName(nick)} - ${safeName(deviceId)}`
+    : safeName(deviceId);
   return path.join(GPX_DIR, date, `${base}.gpx`);
 }
 
-function loadExistingPoints(deviceId, date) {
-  // Read today's file (if any) and parse trackpoints so a restart doesn't lose them.
-  try {
-    const content = fs.readFileSync(gpxFilePath(deviceId, date), 'utf8');
-    const points = [];
-    const re = /<trkpt lat="([^"]+)" lon="([^"]+)">([\s\S]*?)<\/trkpt>/g;
-    let m;
-    while ((m = re.exec(content)) !== null) {
-      const inner = m[3];
-      points.push({
-        lat: parseFloat(m[1]),
-        lon: parseFloat(m[2]),
-        ele: inner.match(/<ele>([^<]+)<\/ele>/)?.[1] ?? null,
-        spd: inner.match(/<speed>([^<]+)<\/speed>/)?.[1] ?? null,
-        time: inner.match(/<time>([^<]+)<\/time>/)?.[1] ?? new Date().toISOString(),
-      });
-    }
-    return points;
-  } catch {
-    return [];
-  }
-}
-
+// Writes the complete in-memory point list for a device+date to a GPX file.
+// Called after every new trackpoint so the file on disk is always up to date.
 function writeGpx(deviceId, date) {
   const points = trackpoints.get(deviceId)?.get(date);
   if (!points || points.length === 0) return;
@@ -69,15 +73,21 @@ function writeGpx(deviceId, date) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 
   const label = nicknames[deviceId] || deviceId;
+
+  // Build the <trkpt> elements, including optional elevation and speed
   const trkpts = points.map(p => {
     let s = `    <trkpt lat="${p.lat}" lon="${p.lon}">`;
     if (p.ele != null) s += `\n      <ele>${p.ele}</ele>`;
     s += `\n      <time>${p.time}</time>`;
-    if (p.spd != null) s += `\n      <extensions><speed>${parseFloat(p.spd).toFixed(3)}</speed></extensions>`;
+    if (p.spd != null) {
+      s += `\n      <extensions><speed>${parseFloat(p.spd).toFixed(3)}</speed></extensions>`;
+    }
     s += `\n    </trkpt>`;
     return s;
   }).join('\n');
 
+  // The <metadata><desc> tag stores the raw deviceId so the file can be
+  // re-associated with a device after a server restart (see preloadTodayTracks)
   const gpx =
 `<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="Mapper" xmlns="http://www.topografix.com/GPX/1/1">
@@ -93,158 +103,176 @@ ${trkpts}
   fs.writeFileSync(filePath, gpx, 'utf8');
 }
 
+// Adds a new trackpoint for a device, then rewrites its GPX file and
+// broadcasts the new point to all connected browsers.
 function addTrackpoint(data) {
   const date = dateStr(data.timestamp);
+
+  // Initialise the nested Map structure on first encounter
   if (!trackpoints.has(data.deviceId)) trackpoints.set(data.deviceId, new Map());
   const devMap = trackpoints.get(data.deviceId);
+
+  // On first point of the day, load any existing points from disk.
+  // preloadTodayTracks() handles this at startup, but this is a safety net
+  // for devices not yet in the Map (e.g. a brand-new device mid-day).
   if (!devMap.has(date)) devMap.set(date, loadExistingPoints(data.deviceId, date));
+
   devMap.get(date).push({
-    lat: data.lat,
-    lon: data.lon,
-    ele: data.alt,
-    acc: data.acc,
-    spd: data.spd,
+    lat:  data.lat,
+    lon:  data.lon,
+    ele:  data.alt,   // altitude in metres
+    acc:  data.acc,   // GPS accuracy in metres (not stored in GPX, kept in memory)
+    spd:  data.spd,   // speed in m/s
     time: new Date(data.timestamp).toISOString(),
   });
+
   writeGpx(data.deviceId, date);
+
+  // Push the new point to all open browser tabs so polylines update live
   broadcast({
-    type: 'trackpoint',
+    type:     'trackpoint',
     deviceId: data.deviceId,
-    lat: data.lat,
-    lon: data.lon,
-    acc: data.acc,
-    time: new Date(data.timestamp).toISOString(),
+    lat:      data.lat,
+    lon:      data.lon,
+    acc:      data.acc,
+    time:     new Date(data.timestamp).toISOString(),
   });
 }
 
-// Pre-load today's GPX files into the trackpoints Map so browsers connecting
-// right after a server restart still receive the full day's history.
+// Scans today's GPX folder on startup and populates the in-memory trackpoints
+// Map. This means browsers connecting right after a server restart still get
+// the full day's trail via GET /tracks.
 function preloadTodayTracks() {
   const today = dateStr(Date.now());
-  const dir = path.join(GPX_DIR, today);
+  const dir   = path.join(GPX_DIR, today);
   if (!fs.existsSync(dir)) return;
+
   fs.readdirSync(dir).filter(f => f.endsWith('.gpx')).forEach(file => {
     try {
       const content = fs.readFileSync(path.join(dir, file), 'utf8');
 
-      // Primary: deviceId stored in <metadata><desc>
+      // Primary: deviceId is stored in <metadata><desc>deviceId</desc></metadata>
       let deviceId = (content.match(/<metadata>\s*<desc>([^<]+)<\/desc>\s*<\/metadata>/) || [])[1];
 
-      // Fallback: extract from <name>Label (deviceId) — date</name>
+      // Fallback for older files: extract from <name>Label (deviceId) — date</name>
       if (!deviceId) {
         deviceId = (content.match(/<name>[^(]*\(([^)]+)\)/) || [])[1];
       }
 
-      if (!deviceId) return;
+      if (!deviceId) return; // can't identify device — skip
 
       if (!trackpoints.has(deviceId)) trackpoints.set(deviceId, new Map());
       const devMap = trackpoints.get(deviceId);
+
       if (!devMap.has(today)) {
-        // Parse points directly from the content we already have in memory
+        // Parse all <trkpt> elements from the file content already in memory
         const points = [];
         const re = /<trkpt lat="([^"]+)" lon="([^"]+)">([\s\S]*?)<\/trkpt>/g;
         let m;
         while ((m = re.exec(content)) !== null) {
           const inner = m[3];
           points.push({
-            lat: parseFloat(m[1]),
-            lon: parseFloat(m[2]),
-            ele: (inner.match(/<ele>([^<]+)<\/ele>/) || [])[1] ?? null,
-            acc: null, // acc is not stored in GPX
-            spd: (inner.match(/<speed>([^<]+)<\/speed>/) || [])[1] ?? null,
-            time: (inner.match(/<time>([^<]+)<\/time>/) || [])[1] ?? new Date().toISOString(),
+            lat:  parseFloat(m[1]),
+            lon:  parseFloat(m[2]),
+            ele:  (inner.match(/<ele>([^<]+)<\/ele>/)      || [])[1] ?? null,
+            acc:  null, // accuracy is not written to GPX files
+            spd:  (inner.match(/<speed>([^<]+)<\/speed>/)  || [])[1] ?? null,
+            time: (inner.match(/<time>([^<]+)<\/time>/)    || [])[1] ?? new Date().toISOString(),
           });
         }
         devMap.set(today, points);
       }
-    } catch {}
+    } catch {
+      // Skip unreadable or malformed files silently
+    }
   });
 }
 
-// Ring buffer of the last 100 log lines for replaying to new connections
+// ── Ring buffer for log replay ────────────────────────────────────────────────
+// Keeps the last 100 log lines in memory so new browser tabs can see recent
+// activity without waiting for the next GPS ping.
 const logBuffer = [];
 
+// Formats and appends a location update to mapper.log, stores it in the ring
+// buffer, and broadcasts it to all browsers as a 'log' WebSocket message.
 function logUpdate(data) {
-  const time = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  const parts = [`[${time}] ${data.deviceId} →`];
+  const time  = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const parts = [`[${time}] ${data.deviceId} \u2192`];
   parts.push(`${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}`);
   if (data.batt !== null) parts.push(`batt=${data.batt}%`);
-  if (data.spd !== null) parts.push(`spd=${(data.spd * 3.6).toFixed(1)}km/h`);
-  if (data.acc !== null) parts.push(`acc=±${data.acc}m`);
-  if (data.alt !== null) parts.push(`alt=${data.alt}m`);
+  if (data.spd  !== null) parts.push(`spd=${(data.spd * 3.6).toFixed(1)}km/h`);
+  if (data.acc  !== null) parts.push(`acc=\u00b1${data.acc}m`);
+  if (data.alt  !== null) parts.push(`alt=${data.alt}m`);
   const line = parts.join(' ');
 
-  fs.appendFile(LOG_FILE, line + '\n', () => {});
+  fs.appendFile(LOG_FILE, line + '\n', () => {}); // non-blocking disk write
   logBuffer.push(line);
-  if (logBuffer.length > 100) logBuffer.shift();
+  if (logBuffer.length > 100) logBuffer.shift();  // evict oldest entry
   broadcast({ type: 'log', message: line });
 }
 
-const app = express();
-// Wrap Express in a plain http.Server so we can share it with the WebSocket server
-const server = http.createServer(app);
-// WebSocket server mounted at /ws on the same port as HTTP
-const wss = new WebSocket.Server({ server, path: '/ws' });
+// ── Express + WebSocket server ────────────────────────────────────────────────
 
-// In-memory store of the latest location for each device.
-// Key: deviceId (phone serial from GPSLogger %SER token)
-// Value: location object { deviceId, lat, lon, acc, batt, spd, alt, timestamp }
+const app    = express();
+const server = http.createServer(app); // shared HTTP server for both Express and WS
+const wss    = new WebSocket.Server({ server, path: '/ws' });
+
+// In-memory store of the *latest* location for each device.
+// Used to replay current positions to browsers that connect mid-session.
+// Key: deviceId   Value: { deviceId, lat, lon, acc, batt, spd, alt, timestamp }
 const devices = new Map();
 
-// Populate trackpoints from today's GPX files before accepting connections
+// Read today's GPX files into memory before the server starts accepting
+// connections, so GET /tracks returns data immediately after a restart
 preloadTodayTracks();
 
-// Serve index.html and any other static assets from the public/ folder
+// Serve index.html and any static assets (JS, CSS, images) from public/
 app.use(express.static(path.join(__dirname, 'public')));
+// Parse JSON request bodies (used by POST /owntracks and POST /nickname)
 app.use(express.json());
 
-// Location endpoint — called by GPSLogger on each phone.
-// GPSLogger substitutes %LAT, %LON, %SER etc. before sending the request,
-// so the server receives plain numeric values in the query string.
+// ── GPS input endpoints ───────────────────────────────────────────────────────
+
+// GET /location — called by GPSLogger on Android.
+// GPSLogger substitutes tokens like %LAT, %LON, %SER before sending, so the
+// server receives plain numeric strings in the query string.
 app.get('/location', (req, res) => {
   const { lat, lon, device, acc, batt, spd, alt } = req.query;
 
-  // lat and lon are the only fields required to place a marker
   if (!lat || !lon) {
     return res.status(400).send('Missing lat/lon');
   }
 
-  // Fall back to the request IP if GPSLogger didn't send a device ID
+  // Use the phone's serial number as the device ID; fall back to its IP address
   const deviceId = device || req.ip || 'unknown';
 
   const data = {
     deviceId,
-    lat: parseFloat(lat),
-    lon: parseFloat(lon),
-    // Optional fields — stored as null when absent so the frontend can skip them
-    acc: acc ? parseFloat(acc) : null,   // GPS accuracy in metres
-    batt: batt ? parseFloat(batt) : null, // Battery percentage
-    spd: spd ? parseFloat(spd) : null,   // Speed in m/s (GPSLogger unit)
-    alt: alt ? parseFloat(alt) : null,   // Altitude in metres
+    lat:  parseFloat(lat),
+    lon:  parseFloat(lon),
+    acc:  acc  ? parseFloat(acc)  : null, // GPS accuracy in metres
+    batt: batt ? parseFloat(batt) : null, // battery percentage 0–100
+    spd:  spd  ? parseFloat(spd)  : null, // speed in m/s (GPSLogger unit)
+    alt:  alt  ? parseFloat(alt)  : null, // altitude in metres
     timestamp: Date.now(),
   };
 
-  // Overwrite the previous position for this device
-  devices.set(deviceId, data);
+  devices.set(deviceId, data);           // update latest-position store
+  broadcast({ type: 'location', ...data }); // push to all open browsers
+  logUpdate(data);                       // append to mapper.log
+  addTrackpoint(data);                   // append to GPX file
 
-  // Push the update to every browser that is currently connected
-  broadcast({ type: 'location', ...data });
-  logUpdate(data);
-  addTrackpoint(data);
-
-  // GPSLogger only checks for a 200 status; the body content doesn't matter
-  res.send('OK');
+  res.send('OK'); // GPSLogger only checks for HTTP 200; body is ignored
 });
 
-// Location endpoint — called by OwnTracks on iOS/Android.
-// OwnTracks sends a JSON POST body: { _type, lat, lon, tid, batt, vel, alt, acc, ... }
-// tid is a short 2-char tracker ID configured in the OwnTracks app.
+// POST /owntracks — called by OwnTracks on iOS or Android.
+// OwnTracks sends a JSON body for several event types; we only care about
+// _type === 'location'. All other types are acknowledged and ignored.
 app.post('/owntracks', (req, res) => {
   const body = req.body;
 
   if (!body || body._type !== 'location') {
-    // OwnTracks also posts 'transition', 'waypoint', etc. — silently ignore them
-    return res.json([]);
+    return res.json([]); // OwnTracks expects an empty array for non-location events
   }
 
   const { lat, lon, tid, batt, vel, alt, acc } = body;
@@ -253,16 +281,17 @@ app.post('/owntracks', (req, res) => {
     return res.status(400).json([]);
   }
 
+  // tid is the short "tracker ID" configured in the OwnTracks app settings
   const deviceId = tid || req.ip || 'unknown';
 
   const data = {
     deviceId,
-    lat: parseFloat(lat),
-    lon: parseFloat(lon),
-    acc: acc != null ? parseFloat(acc) : null,
-    batt: batt != null ? parseFloat(batt) : null,
-    spd: vel != null ? parseFloat(vel) / 3.6 : null, // OwnTracks sends km/h, store as m/s
-    alt: alt != null ? parseFloat(alt) : null,
+    lat:  parseFloat(lat),
+    lon:  parseFloat(lon),
+    acc:  acc  != null ? parseFloat(acc)         : null,
+    batt: batt != null ? parseFloat(batt)        : null,
+    spd:  vel  != null ? parseFloat(vel) / 3.6   : null, // OwnTracks sends km/h; convert to m/s
+    alt:  alt  != null ? parseFloat(alt)         : null,
     timestamp: Date.now(),
   };
 
@@ -271,11 +300,12 @@ app.post('/owntracks', (req, res) => {
   logUpdate(data);
   addTrackpoint(data);
 
-  // OwnTracks expects an empty JSON array response
-  res.json([]);
+  res.json([]); // OwnTracks protocol requires an empty JSON array response
 });
 
-// Send a JSON message to every open WebSocket connection
+// ── WebSocket broadcast ───────────────────────────────────────────────────────
+
+// Sends a JSON message to every browser tab that is currently connected.
 function broadcast(data) {
   const msg = JSON.stringify(data);
   wss.clients.forEach(client => {
@@ -285,69 +315,86 @@ function broadcast(data) {
   });
 }
 
-// When a new browser tab connects, send it the current position of every
-// known device so the map is populated immediately without waiting for the
-// next GPSLogger ping from each phone.
+// When a new browser tab connects, immediately send it:
+//   1. The latest known position for every tracked device (so markers appear)
+//   2. The last 10 log lines (so the log bar isn't empty)
+// The full day's GPS trail is delivered separately via GET /tracks, which the
+// browser calls in its ws.onopen handler once the connection is confirmed.
 wss.on('connection', ws => {
-  // Send the latest position for every known device immediately on connect
+  // Replay current device positions so the map is populated straight away
   devices.forEach(data => {
     ws.send(JSON.stringify({ type: 'location', ...data }));
   });
-  // Replay the last 10 log lines so the bar is populated immediately
+
+  // Replay the most recent log entries so the log bar shows recent activity
   logBuffer.slice(-10).forEach(line => {
     ws.send(JSON.stringify({ type: 'log', message: line }));
   });
-  // The full day's track is delivered via GET /tracks (called by the browser
-  // in ws.onopen) so there is no need to stream it over the WebSocket.
 });
 
-// Expose the app version from package.json
+// ── REST API endpoints ────────────────────────────────────────────────────────
+
+// GET /version — returns the app version from package.json.
+// The browser displays this in the sidebar header.
 const { version } = require('./package.json');
 app.get('/version', (req, res) => res.json({ version }));
 
-// Today's full track for all devices — used by the browser on initial load.
-// Returns { deviceId: [{lat, lon, time}, …], … }
+// GET /tracks — returns today's full point list for all known devices.
+// Response shape: { deviceId: [{ lat, lon, time, acc }, …], … }
+// Called by the browser in ws.onopen to load the day's GPS trail on page load.
 app.get('/tracks', (req, res) => {
-  const today = dateStr(Date.now());
+  const today  = dateStr(Date.now());
   const result = {};
   trackpoints.forEach((devMap, deviceId) => {
     const pts = devMap.get(today);
     if (pts && pts.length > 0) {
-      result[deviceId] = pts.map(p => ({ lat: p.lat, lon: p.lon, time: p.time, acc: p.acc ?? null }));
+      result[deviceId] = pts.map(p => ({
+        lat:  p.lat,
+        lon:  p.lon,
+        time: p.time,
+        acc:  p.acc ?? null,
+      }));
     }
   });
   res.json(result);
 });
 
-// Serve today's GPX file for a specific device as a download.
-// GET /gpx/:deviceId
+// GET /gpx/:deviceId — serves today's GPX file for a single device as a
+// file download. The browser triggers this when the ⇩ button is clicked.
 app.get('/gpx/:deviceId', (req, res) => {
   const deviceId = req.params.deviceId;
-  const today = dateStr(Date.now());
+  const today    = dateStr(Date.now());
   const filePath = gpxFilePath(deviceId, today);
+
   if (!fs.existsSync(filePath)) {
     return res.status(404).send('No track for this device today');
   }
+
   const filename = path.basename(filePath);
   res.setHeader('Content-Type', 'application/gpx+xml');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.sendFile(filePath);
 });
 
-// Nickname endpoints — browser POSTs when user sets/clears a nickname.
-// Stored server-side so GPX filenames are correct even before the browser loads.
+// GET /nicknames — returns the full nickname map { deviceId: nickname }.
+// The browser merges this with its localStorage copy on page load so
+// nicknames set from one browser are visible on all others.
 app.get('/nicknames', (req, res) => res.json(nicknames));
 
+// POST /nickname — sets or clears a nickname for a device.
+// Body: { deviceId: string, nickname: string | null }
+// Also renames today's GPX file if it already exists under the old name.
 app.post('/nickname', (req, res) => {
   const { deviceId, nickname } = req.body;
   if (!deviceId) return res.status(400).json({ error: 'deviceId required' });
 
   const today = dateStr(Date.now());
 
-  // Rename today's GPX file if it already exists under the old name
-  const oldPath = gpxFilePath(deviceId, today);
+  // Capture the path under the *old* nickname before changing it
+  const oldPath   = gpxFilePath(deviceId, today);
   const oldExists = fs.existsSync(oldPath);
 
+  // Update the in-memory map and persist to disk
   if (nickname) {
     nicknames[deviceId] = nickname;
   } else {
@@ -355,6 +402,7 @@ app.post('/nickname', (req, res) => {
   }
   saveNicknames();
 
+  // Rename the GPX file so it matches the new nickname immediately
   if (oldExists) {
     const newPath = gpxFilePath(deviceId, today);
     if (oldPath !== newPath) {
@@ -364,6 +412,8 @@ app.post('/nickname', (req, res) => {
 
   res.json({ ok: true });
 });
+
+// ── Start server ──────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
