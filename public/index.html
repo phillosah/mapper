@@ -265,6 +265,14 @@
       return new Date(ts).toLocaleTimeString();
     }
 
+    // Returns "just now", "X min ago", or the absolute time if > 60 min old
+    function relativeTime(ts) {
+      const sec = Math.floor((Date.now() - ts) / 1000);
+      if (sec < 30) return 'just now';
+      if (sec < 3600) return `${Math.floor(sec / 60)} min ago`;
+      return new Date(ts).toLocaleTimeString();
+    }
+
     // ── Nickname editing ──────────────────────────────────────────────────────
     // Called when the edit pencil is clicked on a device card
     function startEdit(event, id) {
@@ -328,7 +336,7 @@
             <div class="device-meta">
               <span>${d.lat.toFixed(5)}, ${d.lon.toFixed(5)}</span><br>
               <span>${batt}</span><span>${spd}</span><span>${acc}</span><br>
-              <span>&#x23F1; ${formatTime(d.timestamp)}</span>
+              <span>&#x23F1; ${relativeTime(d.timestamp)}</span>
             </div>
           </div>`;
       }).join('');
@@ -485,6 +493,9 @@
       el.innerHTML = logLines.map(l => `<div>${l}</div>`).join('');
       el.scrollTop = el.scrollHeight;
     }
+
+    // Refresh sidebar every minute so relative timestamps stay accurate
+    setInterval(updateSidebar, 60000);
 
     connect();
   </script>
