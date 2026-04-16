@@ -138,6 +138,10 @@ wss.on('connection', ws => {
   });
 });
 
+// Expose the app version from package.json
+const { version } = require('./package.json');
+app.get('/version', (req, res) => res.json({ version }));
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Mapper server running at http://localhost:${PORT}`);

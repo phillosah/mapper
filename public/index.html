@@ -12,29 +12,76 @@
     body { display: flex; flex-direction: column; height: 100vh; font-family: sans-serif; }
     #main { display: flex; flex: 1; min-height: 0; }
 
+    /* ── Sidebar ── */
     #sidebar {
       width: 260px;
       background: #1e1e2e;
       color: #cdd6f4;
       display: flex;
       flex-direction: column;
-      flex-shrink: 0; /* prevent sidebar from shrinking when map is small */
+      flex-shrink: 0;
+      transition: width 0.22s ease;
+      overflow: hidden;
     }
-    #sidebar h1 {
-      padding: 16px;
-      font-size: 1.1rem;
+    #sidebar.collapsed { width: 36px; }
+
+    /* Header row: title + toggle button */
+    #sidebar-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 10px 0 16px;
+      min-height: 48px;
       border-bottom: 1px solid #313244;
+      flex-shrink: 0;
+    }
+    #sidebar-title {
+      font-size: 1.1rem;
       color: #89b4fa;
       letter-spacing: 0.05em;
+      white-space: nowrap;
+      overflow: hidden;
     }
-    #sidebar h2 {
+    #sidebar-title .version {
+      font-size: 0.65rem;
+      color: #6c7086;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+    #toggle-btn {
+      background: none;
+      border: none;
+      color: #6c7086;
+      font-size: 0.9rem;
+      cursor: pointer;
+      padding: 4px 2px;
+      flex-shrink: 0;
+      line-height: 1;
+      transition: color 0.15s;
+    }
+    #toggle-btn:hover { color: #89b4fa; }
+
+    /* Inner content hidden when collapsed */
+    #sidebar-inner {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+    #sidebar.collapsed #sidebar-inner { visibility: hidden; }
+
+    #sidebar-inner h2 {
       padding: 10px 16px 6px;
       font-size: 0.75rem;
       text-transform: uppercase;
       letter-spacing: 0.08em;
       color: #6c7086;
+      flex-shrink: 0;
     }
-    #device-list { flex: 1; overflow-y: auto; } /* scrollable if many devices */
+    #device-list { flex: 1; overflow-y: auto; }
+
+    /* ── Device cards ── */
     .device-card {
       padding: 10px 16px;
       border-bottom: 1px solid #181825;
@@ -42,11 +89,45 @@
       transition: background 0.15s;
     }
     .device-card:hover { background: #313244; }
+    .device-name-row {
+      display: flex;
+      align-items: center;
+      margin-bottom: 4px;
+      gap: 6px;
+    }
     .device-name {
       font-weight: 600;
       font-size: 0.9rem;
       color: #cba6f7;
-      margin-bottom: 4px;
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .edit-btn {
+      background: none;
+      border: none;
+      color: #45475a;
+      cursor: pointer;
+      font-size: 0.75rem;
+      padding: 1px 3px;
+      border-radius: 3px;
+      flex-shrink: 0;
+      transition: color 0.15s;
+      line-height: 1;
+    }
+    .edit-btn:hover { color: #cba6f7; }
+    .nickname-input {
+      flex: 1;
+      background: #181825;
+      border: 1px solid #89b4fa;
+      border-radius: 4px;
+      color: #cba6f7;
+      font-size: 0.85rem;
+      font-weight: 600;
+      padding: 1px 6px;
+      outline: none;
+      min-width: 0;
     }
     .device-meta {
       font-size: 0.75rem;
@@ -60,18 +141,21 @@
       width: 8px; height: 8px;
       border-radius: 50%;
       background: #a6e3a1;
-      margin-right: 4px;
-      vertical-align: middle;
+      flex-shrink: 0;
     }
+
     /* Connection status bar at the bottom of the sidebar */
     #status {
       padding: 10px 16px;
       font-size: 0.75rem;
       color: #6c7086;
       border-top: 1px solid #313244;
+      flex-shrink: 0;
     }
+
     #map { flex: 1; }
-    /* Log bar — spans full width at the bottom */
+
+    /* ── Log bar ── */
     #log-bar {
       height: 152px;
       background: #11111b;
@@ -96,11 +180,16 @@
 <body>
   <div id="main">
     <div id="sidebar">
-      <h1>&#x1F4CD; Mapper</h1>
-      <h2>Devices</h2>
-      <!-- Device cards are injected here by updateSidebar() -->
-      <div id="device-list"><div class="device-meta" style="padding:12px 16px">No devices yet</div></div>
-      <div id="status">Connecting...</div>
+      <div id="sidebar-header">
+        <span id="sidebar-title">&#x1F4CD; Mapper <span class="version" id="version"></span></span>
+        <button id="toggle-btn" onclick="toggleSidebar()" title="Toggle sidebar">&#x25C0;</button>
+      </div>
+      <div id="sidebar-inner">
+        <h2>Devices</h2>
+        <!-- Device cards are injected here by updateSidebar() -->
+        <div id="device-list"><div class="device-meta" style="padding:12px 16px">No devices yet</div></div>
+        <div id="status">Connecting...</div>
+      </div>
     </div>
     <div id="map"></div>
   </div>
@@ -112,10 +201,13 @@
   <!-- Leaflet JS — must load after the CSS above -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-    // Initialise the map centred on the world at zoom 2
-    const map = L.map('map').setView([20, 0], 2);
+    // ── Version ──────────────────────────────────────────────────────────────
+    fetch('/version')
+      .then(r => r.json())
+      .then(({ version }) => { document.getElementById('version').textContent = 'v' + version; });
 
-    // OpenStreetMap raster tiles (free, no API key required)
+    // ── Map ───────────────────────────────────────────────────────────────────
+    const map = L.map('map').setView([20, 0], 2);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       maxZoom: 19,
@@ -125,13 +217,66 @@
     const markers = {};
     // Latest location data for each device, keyed by deviceId
     const deviceData = {};
+    // Nicknames stored in localStorage: { deviceId: nickname }
+    const nicknames = JSON.parse(localStorage.getItem('mapper_nicknames') || '{}');
 
-    // Format a Unix timestamp as a local time string (HH:MM:SS)
+    function saveNicknames() {
+      localStorage.setItem('mapper_nicknames', JSON.stringify(nicknames));
+    }
+
+    function getLabel(id) {
+      return nicknames[id] || id;
+    }
+
+    // ── Sidebar toggle ────────────────────────────────────────────────────────
+    function toggleSidebar() {
+      const sidebar = document.getElementById('sidebar');
+      const btn = document.getElementById('toggle-btn');
+      sidebar.classList.toggle('collapsed');
+      btn.innerHTML = sidebar.classList.contains('collapsed') ? '&#x25B6;' : '&#x25C0;';
+      // Notify Leaflet that the map container resized
+      setTimeout(() => map.invalidateSize(), 230);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
     function formatTime(ts) {
       return new Date(ts).toLocaleTimeString();
     }
 
-    // Re-render the sidebar device list from the current deviceData state
+    // ── Nickname editing ──────────────────────────────────────────────────────
+    // Called when the edit pencil is clicked on a device card
+    function startEdit(event, id) {
+      event.stopPropagation(); // don't trigger focusDevice
+      const row = document.getElementById('name-row-' + id);
+      const current = nicknames[id] || '';
+      row.innerHTML = `
+        <span class="dot"></span>
+        <input class="nickname-input" id="nick-input-${id}"
+               value="${current}" placeholder="${id}" maxlength="32"
+               onkeydown="handleNickKey(event,'${id}')"
+               onblur="commitEdit('${id}')" />
+      `;
+      const input = document.getElementById('nick-input-' + id);
+      input.focus();
+      input.select();
+    }
+
+    function handleNickKey(event, id) {
+      if (event.key === 'Enter') { event.target.blur(); }
+      if (event.key === 'Escape') { event.target.dataset.cancel = '1'; event.target.blur(); }
+    }
+
+    function commitEdit(id) {
+      const input = document.getElementById('nick-input-' + id);
+      if (!input || input.dataset.cancel === '1') { updateSidebar(); return; }
+      const val = input.value.trim();
+      if (val) { nicknames[id] = val; } else { delete nicknames[id]; }
+      saveNicknames();
+      updateSidebar();
+      refreshPopup(id);
+    }
+
+    // ── Sidebar rendering ─────────────────────────────────────────────────────
     function updateSidebar() {
       const list = document.getElementById('device-list');
       const ids = Object.keys(deviceData);
@@ -141,14 +286,17 @@
       }
       list.innerHTML = ids.map(id => {
         const d = deviceData[id];
-        // Only render a field if the server sent a value for it
+        const label = getLabel(id);
         const batt = d.batt !== null ? `&#x1F50B; ${d.batt}%` : '';
-        // GPSLogger sends speed in m/s; convert to km/h for display
-        const spd = d.spd !== null ? `&#x1F3CE; ${(d.spd * 3.6).toFixed(1)} km/h` : '';
-        const acc = d.acc !== null ? `&#x25CE; &plusmn;${d.acc}m` : '';
+        const spd  = d.spd  !== null ? `&#x1F3CE; ${(d.spd * 3.6).toFixed(1)} km/h` : '';
+        const acc  = d.acc  !== null ? `&#x25CE; &plusmn;${d.acc}m` : '';
         return `
           <div class="device-card" onclick="focusDevice('${id}')">
-            <div class="device-name"><span class="dot"></span>${id}</div>
+            <div class="device-name-row" id="name-row-${id}">
+              <span class="dot"></span>
+              <span class="device-name">${label}</span>
+              <button class="edit-btn" onclick="startEdit(event,'${id}')" title="Set nickname">&#x270F;</button>
+            </div>
             <div class="device-meta">
               <span>${d.lat.toFixed(5)}, ${d.lon.toFixed(5)}</span><br>
               <span>${batt}</span><span>${spd}</span><span>${acc}</span><br>
@@ -158,61 +306,57 @@
       }).join('');
     }
 
-    // Pan and zoom the map to a specific device when its sidebar card is clicked
+    // ── Map interactions ──────────────────────────────────────────────────────
     function focusDevice(id) {
       const d = deviceData[id];
       if (d) map.setView([d.lat, d.lon], 15);
     }
 
-    // Handle an incoming location message from the WebSocket.
-    // Creates a new marker the first time a device is seen, then moves it on
-    // subsequent updates — avoiding the flicker of remove-and-recreate.
-    function onLocation(data) {
-      // Overwrite previous data so the sidebar always shows the latest values
-      deviceData[data.deviceId] = data;
-
-      // Build popup HTML as a function so it can be regenerated after updates
-      const popupContent = () => `
-        <b>${data.deviceId}</b><br>
+    function popupContent(data) {
+      const id = data.deviceId;
+      const label = getLabel(id);
+      const nick = nicknames[id] ? `<span style="color:#888;font-weight:normal;font-size:0.85em">(${id})</span>` : '';
+      return `
+        <b>${label}</b> ${nick}<br>
         ${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}<br>
-        ${data.acc !== null ? `Accuracy: &plusmn;${data.acc}m<br>` : ''}
+        ${data.acc  !== null ? `Accuracy: &plusmn;${data.acc}m<br>` : ''}
         ${data.batt !== null ? `Battery: ${data.batt}%<br>` : ''}
-        ${data.spd !== null ? `Speed: ${(data.spd * 3.6).toFixed(1)} km/h<br>` : ''}
-        ${data.alt !== null ? `Alt: ${data.alt}m<br>` : ''}
+        ${data.spd  !== null ? `Speed: ${(data.spd * 3.6).toFixed(1)} km/h<br>` : ''}
+        ${data.alt  !== null ? `Alt: ${data.alt}m<br>` : ''}
         <small>${formatTime(data.timestamp)}</small>
       `;
+    }
 
-      if (markers[data.deviceId]) {
-        // Device already has a marker — move it to the new position
-        markers[data.deviceId].setLatLng([data.lat, data.lon]);
-        // If the popup is open, refresh its content too
-        if (markers[data.deviceId].isPopupOpen()) {
-          markers[data.deviceId].setPopupContent(popupContent());
-        }
+    function refreshPopup(id) {
+      if (markers[id] && markers[id].isPopupOpen()) {
+        markers[id].setPopupContent(popupContent(deviceData[id]));
+      }
+    }
+
+    // ── Location updates ──────────────────────────────────────────────────────
+    function onLocation(data) {
+      deviceData[data.deviceId] = data;
+      const id = data.deviceId;
+
+      if (markers[id]) {
+        markers[id].setLatLng([data.lat, data.lon]);
+        if (markers[id].isPopupOpen()) markers[id].setPopupContent(popupContent(data));
       } else {
-        // First time seeing this device — create a marker and add it to the map
-        markers[data.deviceId] = L.marker([data.lat, data.lon])
-          .bindPopup(popupContent())
+        markers[id] = L.marker([data.lat, data.lon])
+          .bindPopup(popupContent(data))
           .addTo(map);
-        // Auto-pan to the first device only; subsequent devices don't hijack the view
-        if (Object.keys(deviceData).length === 1) {
-          map.setView([data.lat, data.lon], 14);
-        }
+        if (Object.keys(deviceData).length === 1) map.setView([data.lat, data.lon], 14);
       }
 
       updateSidebar();
     }
 
-    // Open a WebSocket connection and wire up event handlers.
-    // Called again automatically after a disconnect to keep the map live.
+    // ── WebSocket ─────────────────────────────────────────────────────────────
     function connect() {
-      // Use wss:// when the page is served over HTTPS, ws:// otherwise
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(`${proto}://${location.host}/ws`);
 
-      ws.onopen = () => {
-        document.getElementById('status').textContent = 'Connected';
-      };
+      ws.onopen = () => { document.getElementById('status').textContent = 'Connected'; };
 
       ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
@@ -222,15 +366,13 @@
 
       ws.onclose = () => {
         document.getElementById('status').textContent = 'Disconnected — retrying...';
-        // Retry after 3 seconds; existing markers remain visible during the gap
         setTimeout(connect, 3000);
       };
 
-      // Trigger onclose (and therefore the retry) on any socket error
       ws.onerror = () => ws.close();
     }
 
-    // Keep last 10 log lines and render them into the log bar
+    // ── Log bar ───────────────────────────────────────────────────────────────
     const logLines = [];
     function addLog(message) {
       logLines.push(message);
