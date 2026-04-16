@@ -145,9 +145,16 @@ function addTrackpoint(data) {
 function preloadTodayTracks() {
   const today = dateStr(Date.now());
   const dir   = path.join(GPX_DIR, today);
-  if (!fs.existsSync(dir)) return;
+  console.log('[DEBUG] preloadTodayTracks: today =', today, '| dir =', dir);
+  if (!fs.existsSync(dir)) {
+    console.log('[DEBUG] preloadTodayTracks: directory does not exist — no tracks to preload');
+    return;
+  }
 
-  fs.readdirSync(dir).filter(f => f.endsWith('.gpx')).forEach(file => {
+  const files = fs.readdirSync(dir).filter(f => f.endsWith('.gpx'));
+  console.log('[DEBUG] preloadTodayTracks: found', files.length, 'GPX file(s):', files);
+
+  files.forEach(file => {
     try {
       const content = fs.readFileSync(path.join(dir, file), 'utf8');
 
@@ -159,7 +166,10 @@ function preloadTodayTracks() {
         deviceId = (content.match(/<name>[^(]*\(([^)]+)\)/) || [])[1];
       }
 
-      if (!deviceId) return; // can't identify device — skip
+      if (!deviceId) {
+        console.log('[DEBUG] preloadTodayTracks: could not extract deviceId from', file, '— skipping');
+        return;
+      }
 
       if (!trackpoints.has(deviceId)) trackpoints.set(deviceId, new Map());
       const devMap = trackpoints.get(deviceId);
@@ -181,9 +191,10 @@ function preloadTodayTracks() {
           });
         }
         devMap.set(today, points);
+        console.log('[DEBUG] preloadTodayTracks:', file, '→ deviceId =', deviceId, '| points =', points.length);
       }
-    } catch {
-      // Skip unreadable or malformed files silently
+    } catch (err) {
+      console.log('[DEBUG] preloadTodayTracks: error reading', file, '—', err.message);
     }
   });
 }
@@ -224,6 +235,7 @@ const devices = new Map();
 
 // Read today's GPX files into memory before the server starts accepting
 // connections, so GET /tracks returns data immediately after a restart
+console.log('[DEBUG] GPX_DIR =', GPX_DIR);
 preloadTodayTracks();
 
 // Serve index.html and any static assets (JS, CSS, images) from public/
@@ -331,7 +343,10 @@ wss.on('connection', ws => {
 
   // ② Push today's full track for every device so the polylines are drawn
   const tracks = getTodayTracks();
+  const trackDevices = Object.keys(tracks);
+  console.log('[DEBUG] WS connect: sending track messages for', trackDevices.length, 'device(s):', trackDevices);
   Object.entries(tracks).forEach(([deviceId, points]) => {
+    console.log('[DEBUG] WS connect: sending track for', deviceId, '—', points.length, 'points');
     ws.send(JSON.stringify({ type: 'track', deviceId, points }));
   });
 
@@ -359,8 +374,13 @@ function getTodayTracks() {
 
   // ① Read every GPX file in today's folder from disk
   const dir = path.join(GPX_DIR, today);
+  console.log('[DEBUG] getTodayTracks: today =', today, '| dir =', dir, '| exists =', fs.existsSync(dir));
+
   if (fs.existsSync(dir)) {
-    fs.readdirSync(dir).filter(f => f.endsWith('.gpx')).forEach(file => {
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.gpx'));
+    console.log('[DEBUG] getTodayTracks: GPX files on disk:', files);
+
+    files.forEach(file => {
       try {
         const content = fs.readFileSync(path.join(dir, file), 'utf8');
 
@@ -370,7 +390,10 @@ function getTodayTracks() {
         if (!deviceId) {
           deviceId = (content.match(/<name>[^(]*\(([^)]+)\)/) || [])[1];
         }
-        if (!deviceId) return;
+        if (!deviceId) {
+          console.log('[DEBUG] getTodayTracks: no deviceId in', file, '— skipping');
+          return;
+        }
 
         const points = [];
         const re = /<trkpt lat="([^"]+)" lon="([^"]+)">([\s\S]*?)<\/trkpt>/g;
@@ -385,8 +408,11 @@ function getTodayTracks() {
           });
         }
 
+        console.log('[DEBUG] getTodayTracks:', file, '→ deviceId =', deviceId, '| points =', points.length);
         if (points.length > 0) result[deviceId] = points;
-      } catch {}
+      } catch (err) {
+        console.log('[DEBUG] getTodayTracks: error reading', file, '—', err.message);
+      }
     });
   }
 
@@ -400,10 +426,12 @@ function getTodayTracks() {
       lat: p.lat, lon: p.lon, time: p.time, acc: p.acc ?? null,
     }));
     if (extra.length > 0) {
+      console.log('[DEBUG] getTodayTracks: merging', extra.length, 'in-memory point(s) for', deviceId);
       result[deviceId] = [...(result[deviceId] || []), ...extra];
     }
   });
 
+  console.log('[DEBUG] getTodayTracks: result devices =', Object.keys(result), '| counts =', Object.fromEntries(Object.entries(result).map(([k,v]) => [k, v.length])));
   return result;
 }
 

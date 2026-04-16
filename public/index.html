@@ -641,11 +641,14 @@
     // Clears existing dots first to avoid duplicates when the page reconnects.
     // points: [{ lat, lon, time, acc }, …]
     function loadTrack(id, points) {
+      console.log('[DEBUG] loadTrack:', id, '—', points.length, 'points');
+      if (points.length === 0) { console.warn('[DEBUG] loadTrack: 0 points for', id, '— nothing to draw'); return; }
       ensurePolyline(id);
       clearDots(id);
       trackLatLngs[id] = points.map(p => [p.lat, p.lon]);
       polylines[id].setLatLngs(trackLatLngs[id]);
       points.forEach(p => addDot(id, p.lat, p.lon, p.time, p.acc));
+      console.log('[DEBUG] loadTrack: done drawing', id);
     }
 
     // Appends a single new trackpoint received live from the server.
@@ -692,27 +695,43 @@
       const ws    = new WebSocket(`${proto}://${location.host}/ws`);
 
       ws.onopen = () => {
+        console.log('[DEBUG] WebSocket connected');
         document.getElementById('status').textContent = 'Connected';
-        // Tracks are now pushed by the server via 'track' messages on every connect,
-        // so no separate HTTP fetch is needed here.
+        // Tracks are pushed by the server via 'track' messages on connect.
       };
 
       ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.type === 'location')   onLocation(data);               // live device position
-        if (data.type === 'trackpoint') onTrackpoint(data);             // new point appended live
-        if (data.type === 'track')      loadTrack(data.deviceId, data.points); // full day history
-        if (data.type === 'log')        addLog(data.message);           // update log entry
+        let data;
+        try { data = JSON.parse(event.data); }
+        catch (e) { console.error('[DEBUG] WS parse error:', e, event.data); return; }
+
+        if (data.type === 'location') {
+          console.log('[DEBUG] WS location:', data.deviceId, data.lat, data.lon);
+          onLocation(data);
+        } else if (data.type === 'trackpoint') {
+          console.log('[DEBUG] WS trackpoint:', data.deviceId, data.lat, data.lon);
+          onTrackpoint(data);
+        } else if (data.type === 'track') {
+          console.log('[DEBUG] WS track:', data.deviceId, '—', data.points?.length, 'points');
+          loadTrack(data.deviceId, data.points);
+        } else if (data.type === 'log') {
+          addLog(data.message);
+        } else {
+          console.log('[DEBUG] WS unknown type:', data.type);
+        }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (e) => {
+        console.log('[DEBUG] WebSocket closed — code:', e.code, 'reason:', e.reason);
         document.getElementById('status').textContent = 'Disconnected \u2014 retrying...';
         // Retry after 3 s; existing markers remain visible during the gap
         setTimeout(connect, 3000);
       };
 
-      // Treat socket errors as a close so the retry logic kicks in
-      ws.onerror = () => ws.close();
+      ws.onerror = (e) => {
+        console.error('[DEBUG] WebSocket error:', e);
+        ws.close();
+      };
     }
 
     // ── Log bar ───────────────────────────────────────────────────────────────
