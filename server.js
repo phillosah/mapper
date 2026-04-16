@@ -304,6 +304,21 @@ app.get('/tracks', (req, res) => {
   res.json(result);
 });
 
+// Serve today's GPX file for a specific device as a download.
+// GET /gpx/:deviceId
+app.get('/gpx/:deviceId', (req, res) => {
+  const deviceId = req.params.deviceId;
+  const today = dateStr(Date.now());
+  const filePath = gpxFilePath(deviceId, today);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).send('No track for this device today');
+  }
+  const filename = path.basename(filePath);
+  res.setHeader('Content-Type', 'application/gpx+xml');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.sendFile(filePath);
+});
+
 // Nickname endpoints — browser POSTs when user sets/clears a nickname.
 // Stored server-side so GPX filenames are correct even before the browser loads.
 app.get('/nicknames', (req, res) => res.json(nicknames));
