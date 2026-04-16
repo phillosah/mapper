@@ -192,6 +192,24 @@ function preloadTodayTracks() {
         }
         devMap.set(today, points);
         console.log('[DEBUG] preloadTodayTracks:', file, '→ deviceId =', deviceId, '| points =', points.length);
+
+        // Restore the last known position into the devices Map so that browsers
+        // connecting after a server restart still receive a 'location' message
+        // and see the device card in the sidebar.
+        if (points.length > 0 && !devices.has(deviceId)) {
+          const last = points[points.length - 1];
+          devices.set(deviceId, {
+            deviceId,
+            lat:       last.lat,
+            lon:       last.lon,
+            acc:       null,
+            batt:      null,
+            spd:       last.spd ? parseFloat(last.spd) : null,
+            alt:       last.ele ? parseFloat(last.ele) : null,
+            timestamp: new Date(last.time).getTime(),
+          });
+          console.log('[DEBUG] preloadTodayTracks: restored last position for', deviceId, 'ts =', last.time);
+        }
       }
     } catch (err) {
       console.log('[DEBUG] preloadTodayTracks: error reading', file, '—', err.message);
