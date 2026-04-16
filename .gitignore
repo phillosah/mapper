@@ -1,1 +1,6 @@
 node_modules/
+.claude/
+.~lock.*
+mapper.log
+nicknames.json
+gpx/
