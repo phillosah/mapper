@@ -73,6 +73,65 @@
     }
     #toggle-btn:hover { color: #89b4fa; }
 
+    /* Gear button that opens the settings panel */
+    #settings-btn {
+      background: none;
+      border: none;
+      color: #6c7086;
+      font-size: 0.9rem;
+      cursor: pointer;
+      padding: 4px 2px;
+      flex-shrink: 0;
+      line-height: 1;
+      transition: color 0.15s;
+    }
+    #settings-btn:hover { color: #89b4fa; }
+    /* Hide the gear when the sidebar is collapsed */
+    #sidebar.collapsed #settings-btn { display: none; }
+
+    /* ── Settings panel ──────────────────────────────────────────────────────── */
+    #settings-panel {
+      background: #181825;
+      border-bottom: 1px solid #313244;
+      padding: 10px 16px 12px;
+      flex-shrink: 0;
+    }
+    #sidebar.collapsed #settings-panel { display: none !important; }
+
+    #settings-panel .setting-label {
+      display: block;
+      font-size: 0.68rem;
+      color: #6c7086;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 4px;
+    }
+    #settings-panel input[type=text] {
+      width: 100%;
+      background: #1e1e2e;
+      border: 1px solid #313244;
+      border-radius: 4px;
+      color: #cdd6f4;
+      font-size: 0.82rem;
+      padding: 4px 8px;
+      margin-bottom: 4px;
+      outline: none;
+      box-sizing: border-box;
+    }
+    #settings-panel input[type=text]:focus { border-color: #89b4fa; }
+    #tz-preview { font-size: 0.7rem; margin-bottom: 8px; min-height: 1em; }
+    .settings-save {
+      background: #89b4fa;
+      color: #1e1e2e;
+      border: none;
+      border-radius: 4px;
+      padding: 3px 14px;
+      font-size: 0.78rem;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .settings-save:hover { background: #74c7ec; }
+
     /*
      * #sidebar-inner wraps the device list and status bar.
      * It is hidden (visibility:hidden) when collapsed so the toggle button
@@ -223,10 +282,24 @@
   <!-- Main row: sidebar on the left, Leaflet map on the right -->
   <div id="main">
     <div id="sidebar">
-      <!-- Header: app title with version + collapse button -->
+      <!-- Header: app title with version + settings gear + collapse button -->
       <div id="sidebar-header">
         <span id="sidebar-title">&#x1F4CD; Mapper <span class="version" id="version"></span></span>
-        <button id="toggle-btn" onclick="toggleSidebar()" title="Toggle sidebar">&#x25C0;</button>
+        <div style="display:flex;gap:2px;flex-shrink:0">
+          <button id="settings-btn" onclick="toggleSettings()" title="Settings">&#x2699;</button>
+          <button id="toggle-btn" onclick="toggleSidebar()" title="Toggle sidebar">&#x25C0;</button>
+        </div>
+      </div>
+
+      <!-- Settings panel (hidden by default, toggled by the gear button) -->
+      <div id="settings-panel" style="display:none">
+        <span class="setting-label" for="tz-input">Timezone</span>
+        <input type="text" id="tz-input" list="tz-list"
+               placeholder="e.g. Asia/Kuala_Lumpur"
+               oninput="updateTzPreview()" />
+        <datalist id="tz-list"></datalist>
+        <div id="tz-preview" style="color:#6c7086"></div>
+        <button class="settings-save" onclick="saveSettings()">Apply</button>
       </div>
       <div id="sidebar-inner">
         <h2>Devices</h2>
@@ -339,11 +412,83 @@
         saveNicknames();
       });
 
+    // ── Timezone setting ──────────────────────────────────────────────────────
+    // Persisted in localStorage. Defaults to the browser's own timezone.
+    let userTimezone = localStorage.getItem('mapper_timezone')
+      || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+    // Populate the <datalist> with all IANA timezone names.
+    // Intl.supportedValuesOf is available in Chrome 99+, Firefox 107+, Safari 15.4+.
+    // Falls back to a curated list for older browsers.
+    (function populateTzList() {
+      const list  = document.getElementById('tz-list');
+      const zones = typeof Intl.supportedValuesOf === 'function'
+        ? Intl.supportedValuesOf('timeZone')
+        : ['UTC','America/New_York','America/Chicago','America/Denver',
+           'America/Los_Angeles','America/Sao_Paulo','Europe/London',
+           'Europe/Paris','Europe/Berlin','Europe/Moscow','Africa/Cairo',
+           'Asia/Dubai','Asia/Kolkata','Asia/Bangkok','Asia/Singapore',
+           'Asia/Kuala_Lumpur','Asia/Hong_Kong','Asia/Shanghai',
+           'Asia/Tokyo','Australia/Sydney','Pacific/Auckland','Pacific/Honolulu'];
+      zones.forEach(z => { const o = document.createElement('option'); o.value = z; list.appendChild(o); });
+    })();
+
+    function toggleSettings() {
+      const panel = document.getElementById('settings-panel');
+      const open  = panel.style.display !== 'none';
+      panel.style.display = open ? 'none' : 'block';
+      if (!open) {
+        document.getElementById('tz-input').value = userTimezone;
+        updateTzPreview();
+      }
+    }
+
+    // Shows the current time in the typed timezone so the user can verify it.
+    function updateTzPreview() {
+      const tz = document.getElementById('tz-input').value.trim();
+      const el  = document.getElementById('tz-preview');
+      try {
+        const t = new Date().toLocaleTimeString([], {
+          timeZone: tz, hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
+        });
+        el.textContent  = 'Now: ' + t;
+        el.style.color  = '#a6e3a1';
+      } catch {
+        el.textContent  = 'Invalid timezone name';
+        el.style.color  = '#f38ba8';
+      }
+    }
+
+    // Saves the new timezone and refreshes all timestamps in the UI.
+    function saveSettings() {
+      const tz = document.getElementById('tz-input').value.trim();
+      try {
+        new Date().toLocaleString('en', { timeZone: tz }); // throws if invalid
+      } catch {
+        updateTzPreview(); // show the error in the preview
+        return;
+      }
+      userTimezone = tz;
+      localStorage.setItem('mapper_timezone', tz);
+      document.getElementById('settings-panel').style.display = 'none';
+      // Re-render sidebar (relative/absolute timestamps in device cards)
+      updateSidebar();
+      // Redraw history dots so their popup timestamps use the new timezone
+      Object.entries(storedTracks).forEach(([id, pts]) => {
+        clearDots(id);
+        pts.forEach(p => addDot(id, p.lat, p.lon, p.time, p.acc));
+      });
+    }
+
     // ── Sidebar collapse / expand ─────────────────────────────────────────────
     function toggleSidebar() {
       const sidebar = document.getElementById('sidebar');
       const btn     = document.getElementById('toggle-btn');
       sidebar.classList.toggle('collapsed');
+      // Close settings panel when collapsing (it would overflow the narrow rail)
+      if (sidebar.classList.contains('collapsed')) {
+        document.getElementById('settings-panel').style.display = 'none';
+      }
       // Flip the arrow direction to indicate the current state
       btn.innerHTML = sidebar.classList.contains('collapsed') ? '&#x25B6;' : '&#x25C0;';
       // Tell Leaflet the map container changed size so it redraws tiles correctly
@@ -352,20 +497,20 @@
 
     // ── Time formatting ───────────────────────────────────────────────────────
 
-    // Returns an absolute HH:MM:SS string (used in popups)
+    // Returns an absolute HH:MM:SS string in the user's configured timezone.
     function formatTime(ts) {
-      return new Date(ts).toLocaleTimeString();
+      return new Date(ts).toLocaleTimeString([], { timeZone: userTimezone });
     }
 
     // Returns a human-friendly relative string for the sidebar:
     //   < 30 s  → "just now"
     //   < 60 m  → "X min ago"
-    //   older   → absolute time (HH:MM:SS)
+    //   older   → absolute time in the configured timezone
     function relativeTime(ts) {
       const sec = Math.floor((Date.now() - ts) / 1000);
       if (sec < 30)   return 'just now';
       if (sec < 3600) return `${Math.floor(sec / 60)} min ago`;
-      return new Date(ts).toLocaleTimeString();
+      return new Date(ts).toLocaleTimeString([], { timeZone: userTimezone });
     }
 
     // ── Freshness ─────────────────────────────────────────────────────────────
@@ -600,7 +745,7 @@
         `<b>${getLabel(id)}</b><br>` +
         `${lat.toFixed(5)}, ${lon.toFixed(5)}<br>` +
         (acc != null ? `Accuracy: &plusmn;${acc}m<br>` : '') +
-        `<small>${new Date(isoTime).toLocaleTimeString()}</small>`,
+        `<small>${new Date(isoTime).toLocaleTimeString([], { timeZone: userTimezone })}</small>`,
         { maxWidth: 180 }
       ).addTo(map);
 
@@ -637,12 +782,17 @@
       }
     }
 
+    // Full point data for each device, kept in memory so dots can be
+    // re-rendered with updated timezone without re-fetching from the server.
+    const storedTracks = {};
+
     // Loads (or reloads) a complete set of track points for a device.
     // Clears existing dots first to avoid duplicates when the page reconnects.
     // points: [{ lat, lon, time, acc }, …]
     function loadTrack(id, points) {
       console.log('[DEBUG] loadTrack:', id, '—', points.length, 'points');
       if (points.length === 0) { console.warn('[DEBUG] loadTrack: 0 points for', id, '— nothing to draw'); return; }
+      storedTracks[id] = points; // keep for re-rendering on timezone change
       ensurePolyline(id);
       clearDots(id);
       trackLatLngs[id] = points.map(p => [p.lat, p.lon]);
@@ -738,8 +888,25 @@
     // Maintains a rolling window of the last 10 log lines in the bottom bar.
     const logLines = [];
 
+    // Converts the UTC timestamp embedded in a log line to the user's timezone.
+    // Server format: "[2026-04-16 10:30:00] deviceId → ..."  (UTC)
+    function convertLogTimestamp(message) {
+      return message.replace(
+        /^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})\]/,
+        (_, date, time) => {
+          try {
+            // Parse as UTC by appending Z, then reformat in the user's timezone.
+            // The 'sv' locale gives a clean "YYYY-MM-DD HH:MM:SS" format.
+            const d = new Date(`${date}T${time}Z`);
+            const local = d.toLocaleString('sv', { timeZone: userTimezone });
+            return '[' + local + ']';
+          } catch { return `[${date} ${time}]`; }
+        }
+      );
+    }
+
     function addLog(message) {
-      logLines.push(message);
+      logLines.push(convertLogTimestamp(message));
       if (logLines.length > 10) logLines.shift(); // keep only the last 10
       const el = document.getElementById('log-lines');
       el.innerHTML = logLines.map(l => `<div>${l}</div>`).join('');
