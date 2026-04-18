@@ -201,6 +201,28 @@
     .edit-btn:hover { color: #cba6f7; }
     .gpx-btn:hover  { color: #a6e3a1; }
 
+    /* Track visibility checkbox */
+    .track-vis-chk {
+      flex-shrink: 0;
+      cursor: pointer;
+      accent-color: #89b4fa;
+      width: 13px;
+      height: 13px;
+    }
+
+    /* Track colour swatch — native <input type=color> styled to a compact square */
+    .track-color-picker {
+      width: 18px;
+      height: 18px;
+      border: 1px solid #45475a;
+      background: none;
+      padding: 0;
+      cursor: pointer;
+      flex-shrink: 0;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
     /* Inline text input that appears when editing a nickname */
     .nickname-input {
       flex: 1;
@@ -365,6 +387,7 @@
     // ── Colour assignment ─────────────────────────────────────────────────────
     // Each device gets a distinct colour from this palette, assigned on first
     // encounter and kept consistent for the whole session.
+    // Users can override a device's colour via the colour picker — persisted in localStorage.
     const TRACK_COLOURS = [
       '#f38ba8', // red
       '#89b4fa', // blue
@@ -378,12 +401,64 @@
     let colourIdx = 0;
     const deviceColour = {};
 
-    // Returns the assigned colour for a device, allocating one if needed
+    // User-overridden colours: { deviceId: '#rrggbb' }, persisted to localStorage
+    const customColors = JSON.parse(localStorage.getItem('mapper_colors') || '{}');
+    function saveColors() { localStorage.setItem('mapper_colors', JSON.stringify(customColors)); }
+
+    // Track visibility: { deviceId: false } means hidden; missing key = visible
+    const deviceVisible = JSON.parse(localStorage.getItem('mapper_visible') || '{}');
+    function saveVisible() { localStorage.setItem('mapper_visible', JSON.stringify(deviceVisible)); }
+
+    // Returns the assigned colour for a device, allocating one if needed.
+    // Custom colour (from picker) takes precedence over the auto-assigned palette colour.
     function getColour(id) {
+      if (customColors[id]) return customColors[id];
       if (!deviceColour[id]) {
         deviceColour[id] = TRACK_COLOURS[colourIdx++ % TRACK_COLOURS.length];
       }
       return deviceColour[id];
+    }
+
+    // Returns whether the track for a device should be shown on the map.
+    function isVisible(id) {
+      return deviceVisible[id] !== false; // default: visible
+    }
+
+    // Changes the track colour for a device and redraws all its map layers.
+    function changeTrackColor(id, color) {
+      customColors[id] = color;
+      saveColors();
+      if (polylines[id]) polylines[id].setStyle({ color });
+      if (liveAccCircle[id]) liveAccCircle[id].setStyle({ color, fillColor: color });
+      // Redraw dots/rings so they also get the new colour
+      if (storedTracks[id] && isVisible(id)) {
+        clearDots(id);
+        storedTracks[id].forEach(p => addDot(id, p.lat, p.lon, p.time, p.acc));
+      }
+    }
+
+    // Shows or hides all track layers for a device.
+    // When re-showing, rebuilds from storedTracks so newly-arrived points are included.
+    function toggleTrackVisibility(id, visible) {
+      deviceVisible[id] = visible;
+      saveVisible();
+      if (visible) {
+        // Rebuild the full track from stored data
+        if (storedTracks[id] && storedTracks[id].length > 0) {
+          ensurePolyline(id);
+          trackLatLngs[id] = storedTracks[id].map(p => [p.lat, p.lon]);
+          polylines[id].setLatLngs(trackLatLngs[id]);
+          if (!map.hasLayer(polylines[id])) polylines[id].addTo(map);
+          clearDots(id);
+          storedTracks[id].forEach(p => addDot(id, p.lat, p.lon, p.time, p.acc));
+        }
+        if (liveAccCircle[id] && !map.hasLayer(liveAccCircle[id])) liveAccCircle[id].addTo(map);
+      } else {
+        if (polylines[id]  && map.hasLayer(polylines[id]))      polylines[id].remove();
+        (dotMarkers[id] || []).forEach(d => map.hasLayer(d) && d.remove());
+        (accCircles[id]  || []).forEach(c => map.hasLayer(c) && c.remove());
+        if (liveAccCircle[id] && map.hasLayer(liveAccCircle[id])) liveAccCircle[id].remove();
+      }
     }
 
     // ── Nicknames ─────────────────────────────────────────────────────────────
@@ -476,7 +551,9 @@
       // Redraw history dots so their popup timestamps use the new timezone
       Object.entries(storedTracks).forEach(([id, pts]) => {
         clearDots(id);
-        pts.forEach(p => addDot(id, p.lat, p.lon, p.time, p.acc));
+        if (isVisible(id)) {
+          pts.forEach(p => addDot(id, p.lat, p.lon, p.time, p.acc));
+        }
       });
     }
 
@@ -630,11 +707,23 @@
         // Status dot colour reflects whether the device has pinged recently
         const freshDot = isFresh(id) ? '#a6e3a1' : '#f38ba8';
 
+        const trackColour = getColour(id);
+        const visChecked  = isVisible(id) ? 'checked' : '';
+
         return `
           <div class="device-card" onclick="focusDevice('${id}')">
             <div class="device-name-row" id="name-row-${id}">
+              <input type="checkbox" class="track-vis-chk" ${visChecked}
+                     title="Show / hide track"
+                     onclick="event.stopPropagation()"
+                     onchange="toggleTrackVisibility('${id}', this.checked)">
               <span class="dot" style="background:${freshDot}"></span>
               <span class="device-name">${getLabel(id)}</span>
+              <input type="color" class="track-color-picker"
+                     value="${trackColour}"
+                     title="Track colour"
+                     onclick="event.stopPropagation()"
+                     oninput="changeTrackColor('${id}', this.value)">
               <button class="edit-btn"
                       onclick="startEdit(event,'${id}')"
                       title="Set nickname">&#x270F;</button>
@@ -792,22 +881,35 @@
     function loadTrack(id, points) {
       console.log('[DEBUG] loadTrack:', id, '—', points.length, 'points');
       if (points.length === 0) { console.warn('[DEBUG] loadTrack: 0 points for', id, '— nothing to draw'); return; }
-      storedTracks[id] = points; // keep for re-rendering on timezone change
+      storedTracks[id] = points; // keep for re-rendering on timezone / colour change
       ensurePolyline(id);
       clearDots(id);
       trackLatLngs[id] = points.map(p => [p.lat, p.lon]);
       polylines[id].setLatLngs(trackLatLngs[id]);
       points.forEach(p => addDot(id, p.lat, p.lon, p.time, p.acc));
+      // Honour the stored visibility preference — hide layers if the device was toggled off
+      if (!isVisible(id)) {
+        polylines[id].remove();
+        (dotMarkers[id] || []).forEach(d => d.remove());
+        (accCircles[id]  || []).forEach(c => c.remove());
+      }
       console.log('[DEBUG] loadTrack: done drawing', id);
     }
 
     // Appends a single new trackpoint received live from the server.
     // Extends the polyline and adds a new dot without redrawing from scratch.
+    // Always updates storedTracks so re-showing a hidden device is accurate.
     function onTrackpoint(data) {
-      ensurePolyline(data.deviceId);
-      trackLatLngs[data.deviceId].push([data.lat, data.lon]);
-      polylines[data.deviceId].setLatLngs(trackLatLngs[data.deviceId]);
-      addDot(data.deviceId, data.lat, data.lon, data.time, data.acc);
+      const id = data.deviceId;
+      // Keep storedTracks current regardless of visibility
+      if (storedTracks[id]) {
+        storedTracks[id].push({ lat: data.lat, lon: data.lon, time: data.time, acc: data.acc });
+      }
+      if (!isVisible(id)) return; // don't touch map layers if device is hidden
+      ensurePolyline(id);
+      trackLatLngs[id].push([data.lat, data.lon]);
+      polylines[id].setLatLngs(trackLatLngs[id]);
+      addDot(id, data.lat, data.lon, data.time, data.acc);
     }
 
     // ── Live location update ──────────────────────────────────────────────────
